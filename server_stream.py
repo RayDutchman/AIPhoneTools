@@ -367,13 +367,15 @@ def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None):
 
 
 def stream_proxy(upstream_resp):
-    """逐行解析上游 SSE，安全透传，捕获传输中断。"""
+    """
+    按 SSE 事件边界透传上游流。
+    SSE 协议每个事件以 \\n\\n 结尾，iter_content 按原始字节块传输，
+    不会在 JSON 内容中间截断，是最安全的透传方式。
+    """
     try:
-        # 按行迭代比 iter_content 更可靠，每行是一个完整的 SSE 事件
-        for line in upstream_resp.iter_lines(decode_unicode=True):
-            if line:
-                yield (line + "\n\n").encode("utf-8")
-        yield b"data: [DONE]\n\n"
+        for chunk in upstream_resp.iter_content(chunk_size=4096):
+            if chunk:
+                yield chunk
     except Exception as e:
         yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
         yield b"data: [DONE]\n\n"
@@ -457,21 +459,25 @@ def chat_completions():
                 def _stream_and_save():
                     """透传流式，同时收集 assistant 回复内容用于存历史。"""
                     collected = []
+                    buf = b""
                     try:
-                        for line in stream_resp.iter_lines(decode_unicode=True):
-                            if not line:
+                        for chunk in stream_resp.iter_content(chunk_size=4096):
+                            if not chunk:
                                 continue
-                            yield (line + "\n\n").encode("utf-8")
-                            # 收集 delta content 用于存历史
-                            if line.startswith("data:") and "[DONE]" not in line:
-                                try:
-                                    chunk_data = json.loads(line[5:].strip())
-                                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                                    if delta.get("content"):
-                                        collected.append(delta["content"])
-                                except Exception:
-                                    pass
-                        yield b"data: [DONE]\n\n"
+                            yield chunk
+                            # 在缓冲区里解析完整的 SSE 行，收集 delta content
+                            buf += chunk
+                            while b"\n" in buf:
+                                line_bytes, buf = buf.split(b"\n", 1)
+                                line = line_bytes.decode("utf-8", errors="replace").strip()
+                                if line.startswith("data:") and "[DONE]" not in line:
+                                    try:
+                                        chunk_data = json.loads(line[5:].strip())
+                                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                                        if delta.get("content"):
+                                            collected.append(delta["content"])
+                                    except Exception:
+                                        pass
                     except Exception as e:
                         yield _make_sse_chunk(content=f"[流式传输中断: {str(e)}]", finish_reason="stop")
                         yield b"data: [DONE]\n\n"
