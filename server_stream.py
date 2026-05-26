@@ -509,8 +509,9 @@ def chat_completions():
             log.info(f"[TOOL] 检测到 {len(choice['tool_calls'])} 个工具调用:")
             for i, tc in enumerate(choice["tool_calls"]):
                 func_name = tc.get("function", {}).get("name", "")
-                func_args = tc.get("function", {}).get("arguments", "")[:100]
-                log.info(f"  [{i+1}] {func_name}, args={func_args}")
+                func_args_raw = tc.get("function", {}).get("arguments", "")
+                log.info(f"  [{i+1}] {func_name}")
+                log.info(f"      raw_args: {repr(func_args_raw[:150])}")
             
             messages.append(choice)
             tool_results = execute_all_tool_calls(choice["tool_calls"])
@@ -624,8 +625,9 @@ def chat_completions():
         log.info(f"[TOOL] 检测到 {len(tool_calls)} 个工具调用:")
         for i, tc in enumerate(tool_calls):
             func_name = tc.get("function", {}).get("name", "")
-            func_args = tc.get("function", {}).get("arguments", "")[:100]
-            log.info(f"  [{i+1}] {func_name}, args={func_args}")
+            func_args_raw = tc.get("function", {}).get("arguments", "")
+            log.info(f"  [{i+1}] {func_name}")
+            log.info(f"      raw_args: {repr(func_args_raw[:150])}")
         
         yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id, created=resp_created)
 
