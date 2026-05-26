@@ -288,6 +288,13 @@ def call_llm_sync(messages, tools=None):
         payload["tools"] = tools
     t0 = time.time()
     log.info(f"[sync] 发送请求，消息数={len(messages)}, 带工具={tools is not None}")
+    # === 添加详细的消息日志（仅最后3条） ===
+    if len(messages) > 1:
+        for i, msg in enumerate(messages[-3:]):
+            role = msg.get("role", "")
+            content_preview = str(msg.get("content", ""))[:80] if msg.get("content") else ""
+            has_tool_calls = "tool_calls" in msg
+            log.info(f"  msg[{len(messages)-3+i}]: role={role}, has_tool_calls={has_tool_calls}, content={content_preview}...")
     try:
         resp = requests.post(API_URL, json=payload, headers=make_headers(), timeout=120)
         resp.raise_for_status()
