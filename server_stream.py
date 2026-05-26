@@ -340,12 +340,19 @@ def execute_all_tool_calls(tool_calls):
         func_name = func_info.get("name", "")
         tool_call_id = tool_call.get("id", "unknown")
 
+        # === 添加参数解析日志 ===
+        raw_arguments = func_info.get("arguments", "{}")
+        log.info(f"[TOOL_EXEC] {func_name}, raw_arguments={raw_arguments[:200]}")
+        
         try:
-            func_args = json.loads(func_info.get("arguments", "{}"))
+            func_args = json.loads(raw_arguments)
             if not isinstance(func_args, dict):
                 func_args = {}
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            log.warning(f"[TOOL_EXEC] JSON 解析失败: {e}")
             func_args = {}
+        
+        log.info(f"[TOOL_EXEC] {func_name}, parsed_args={func_args}")
 
         if not func_name:
             result = "错误: 工具名称为空"
