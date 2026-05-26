@@ -363,16 +363,21 @@ def execute_all_tool_calls(tool_calls):
 
 # ==== 6. SSE 工具函数 ====
 
-def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None):
-    """构造一个标准 SSE data chunk 的字节串。"""
+def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, created=None):
+    """
+    构造一个符合 OpenAI 规范的 SSE data chunk 字节串。
+    规范要求必填字段：id, object, created, model, choices
+    choices[] 必填：index, delta, finish_reason（可为 null）
+    """
     delta = {}
     if role:
         delta["role"] = role
     if content is not None:
         delta["content"] = content
     chunk = {
-        "id": resp_id,
+        "id": resp_id or f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
+        "created": created or int(time.time()),
         "model": MODEL_NAME,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
     }
@@ -397,14 +402,17 @@ def stream_proxy(upstream_resp):
 
 
 def wrap_as_stream(data):
-    """把非流式响应 dict 包装成 SSE，不重复请求。"""
+    """把非流式响应 dict 包装成合规的 SSE chunk 序列，不重复请求。"""
     choices = data.get("choices", [])
     resp_id = data.get("id", "")
+    created = data.get("created", int(time.time()))
     content = (choices[0].get("message", {}).get("content") or "") if choices else ""
     finish_reason = (choices[0].get("finish_reason") or "stop") if choices else "stop"
 
-    yield _make_sse_chunk(content=content, resp_id=resp_id, role="assistant")
-    yield _make_sse_chunk(finish_reason=finish_reason, resp_id=resp_id)
+    # 第一个 chunk：role + content
+    yield _make_sse_chunk(content=content, resp_id=resp_id, role="assistant", created=created)
+    # 最后一个 chunk：finish_reason，delta 为空
+    yield _make_sse_chunk(finish_reason=finish_reason, resp_id=resp_id, created=created)
     yield b"data: [DONE]\n\n"
 
 
@@ -491,6 +499,7 @@ def chat_completions():
         tc_map = {}
         content_parts = []
         resp_id = ""
+        resp_created = int(time.time())
         has_tool_calls = False
 
         try:
@@ -509,6 +518,8 @@ def chat_completions():
                         data = json.loads(line[5:].strip())
                         if not resp_id:
                             resp_id = data.get("id", "")
+                        if data.get("created"):
+                            resp_created = data["created"]
                         choice0 = data.get("choices", [{}])[0]
                         delta = choice0.get("delta", {})
 
@@ -551,13 +562,13 @@ def chat_completions():
             log.info("[stream] 无工具调用，完成")
             if conv_id:
                 _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
-            yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id)
+            yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created)
             yield b"data: [DONE]\n\n"
             return
 
         # 有工具调用：执行工具，第二轮结果追加到同一个流
         log.info(f"[stream] 检测到 {len(tool_calls)} 个工具调用，执行中...")
-        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id)
+        yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id, created=resp_created)
 
         assistant_msg = {
             "role": "assistant",
@@ -603,6 +614,22 @@ def chat_completions():
                 _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(collected)}])
 
     return Response(_generate(), content_type='text/event-stream; charset=utf-8')
+
+
+@app.route('/v1/models', methods=['GET'])
+def list_models():
+    """OpenAI 兼容的模型列表端点，Chatbox 连接检测时会调用。"""
+    return jsonify({
+        "object": "list",
+        "data": [
+            {
+                "id": MODEL_NAME,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "termux-agent"
+            }
+        ]
+    })
 
 
 @app.route('/v1/sessions', methods=['DELETE'])
