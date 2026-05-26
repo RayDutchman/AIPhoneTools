@@ -51,9 +51,13 @@ def _save_session(conv_id: str, messages: list):
         history = [m for m in messages if m.get("role") != "system"]
         # 每轮至少包含 user + assistant，粗略按消息数裁剪
         max_msgs = SESSION_MAX_TURNS * 4  # user + assistant(tool_calls) + tool + assistant
+        before_trim = len(history)
         if len(history) > max_msgs:
             history = history[-max_msgs:]
         _sessions[conv_id] = history
+        
+        # === 添加保存日志 ===
+        log.info(f"[SESSION] 保存 conv_id={conv_id!r}, 消息数: {before_trim} -> {len(history)}")
 
 
 def _clear_session(conv_id: str):
@@ -431,10 +435,32 @@ def chat_completions():
     chatbox_data = request.json or {}
     want_stream = chatbox_data.get("stream", False)
 
-    conv_id = chatbox_data.get("conversation_id") or chatbox_data.get("id") or ""
+    # 增强 conv_id 提取逻辑（尝试多种字段名）
+    conv_id = (
+        chatbox_data.get("conversation_id") or 
+        chatbox_data.get("id") or 
+        chatbox_data.get("conversationId") or
+        chatbox_data.get("session_id") or
+        ""
+    )
 
     incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
     latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
+    
+    # 如果 conv_id 还是空，用 user 消息的 hash 作为 fallback
+    if not conv_id and incoming:
+        import hashlib
+        first_user = next((m for m in incoming if m.get("role") == "user"), None)
+        if first_user:
+            conv_id = "fallback-" + hashlib.md5(
+                str(first_user.get("content", ""))[:100].encode()
+            ).hexdigest()[:8]
+    
+    # === 添加请求日志 ===
+    log.info(f"[REQUEST] conv_id={conv_id!r}, stream={want_stream}, incoming_msgs={len(incoming)}")
+    if latest_user_msg:
+        user_content = latest_user_msg.get("content", "")[:50]
+        log.info(f"[REQUEST] latest_user_msg: {user_content}...")
 
     system_prompt = {
         "role": "system",
@@ -450,6 +476,9 @@ def chat_completions():
     if latest_user_msg and (not server_history or server_history[-1] != latest_user_msg):
         server_history.append(latest_user_msg)
 
+    # === 添加 session 日志 ===
+    log.info(f"[SESSION] history_length={len(server_history)}")
+
     messages = [system_prompt] + server_history
 
     # ---- 非流式模式（逻辑不变）----
@@ -462,10 +491,20 @@ def chat_completions():
         choice = safe_get_choice(first_data)
 
         if choice.get("tool_calls"):
+            # === 添加详细工具调用日志 ===
+            log.info(f"[TOOL] 检测到 {len(choice['tool_calls'])} 个工具调用:")
+            for i, tc in enumerate(choice["tool_calls"]):
+                func_name = tc.get("function", {}).get("name", "")
+                func_args = tc.get("function", {}).get("arguments", "")[:50]
+                log.info(f"  [{i+1}] {func_name}({func_args}...)")
+            
             messages.append(choice)
             tool_results = execute_all_tool_calls(choice["tool_calls"])
             messages.extend(tool_results)
-            log.info(f"[tool] 执行了 {len(choice['tool_calls'])} 个工具，发起第二轮请求")
+            
+            # === 添加执行结果日志 ===
+            log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
+            log.info(f"[tool] 发起第二轮请求")
             try:
                 second_data = call_llm_sync(messages)
                 if conv_id:
@@ -567,7 +606,13 @@ def chat_completions():
             return
 
         # 有工具调用：执行工具，第二轮结果追加到同一个流
-        log.info(f"[stream] 检测到 {len(tool_calls)} 个工具调用，执行中...")
+        # === 添加详细工具调用日志 ===
+        log.info(f"[TOOL] 检测到 {len(tool_calls)} 个工具调用:")
+        for i, tc in enumerate(tool_calls):
+            func_name = tc.get("function", {}).get("name", "")
+            func_args = tc.get("function", {}).get("arguments", "")[:50]
+            log.info(f"  [{i+1}] {func_name}({func_args}...)")
+        
         yield _make_sse_chunk(content="\n\n⚙️ 正在执行工具...\n\n", resp_id=resp_id, created=resp_created)
 
         assistant_msg = {
@@ -578,7 +623,10 @@ def chat_completions():
         messages.append(assistant_msg)
         tool_results = execute_all_tool_calls(tool_calls)
         messages.extend(tool_results)
-        log.info("[stream] 工具执行完毕，发起第二轮流式请求")
+        
+        # === 添加执行结果日志 ===
+        log.info(f"[TOOL] 执行完毕，结果长度: {[len(r['content']) for r in tool_results]}")
+        log.info("[stream] 发起第二轮流式请求")
 
         try:
             second_resp = call_llm_stream(messages)
@@ -648,4 +696,5 @@ def clear_session(conv_id):
 
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5846, debug=False, threaded=True)
+    # 监听所有网络接口，允许局域网访问
+    app.run(host='0.0.0.0', port=5846, debug=False, threaded=True)
