@@ -262,7 +262,10 @@ def call_llm_stream(messages, tools=None):
     try:
         resp = requests.post(
             API_URL, json=payload, headers=make_headers(),
-            stream=True, timeout=120
+            stream=True,
+            # timeout=(连接超时, 读取每个chunk的超时)
+            # 连接阶段 30s，chunk 间隔最长等 300s（长回复也够用）
+            timeout=(30, 300)
         )
         resp.raise_for_status()
         return resp
@@ -316,14 +319,60 @@ def execute_all_tool_calls(tool_calls):
     return results
 
 
-def stream_proxy(upstream_resp):
-    """将上游 SSE 流逐块透传，捕获 iter_content 中的异常。"""
+def build_tool_context_note(tool_calls, tool_results):
+    """
+    把工具调用过程拼成一段隐藏备注，附加到最终回复末尾。
+    Chatbox 会把这段内容存入历史，下次对话时 LLM 能看到曾经执行过什么。
+    """
+    lines = ["\n\n---\n*[工具执行记录]*"]
+    for tc, tr in zip(tool_calls, tool_results):
+        func_info = tc.get("function", {})
+        name = func_info.get("name", "unknown")
+        try:
+            args = json.loads(func_info.get("arguments", "{}"))
+        except Exception:
+            args = {}
+        result_content = tr.get("content", "")
+        # 只保留前 500 字符作为摘要，避免历史膨胀
+        summary = result_content[:500] + ("..." if len(result_content) > 500 else "")
+        lines.append(f"- 调用 `{name}({args})` → {summary}")
+    return "\n".join(lines)
+
+
+def inject_tool_note_into_response(response_data, note):
+    """把工具备注注入到非流式响应的 content 末尾。"""
+    try:
+        msg = response_data["choices"][0]["message"]
+        original = msg.get("content") or ""
+        msg["content"] = original + note
+    except (KeyError, IndexError):
+        pass
+    return response_data
+
+
+def stream_proxy_with_note(upstream_resp, note):
+    """透传流式响应，在 [DONE] 前插入一个携带工具备注的额外 chunk。"""
     try:
         for chunk in upstream_resp.iter_content(chunk_size=None):
-            if chunk:
+            if not chunk:
+                continue
+            chunk_str = chunk.decode("utf-8", errors="replace")
+            # 拦截 [DONE]，在它之前插入备注 chunk
+            if "data: [DONE]" in chunk_str:
+                note_chunk = {
+                    "object": "chat.completion.chunk",
+                    "model": MODEL_NAME,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": note},
+                        "finish_reason": None,
+                    }]
+                }
+                yield f"data: {json.dumps(note_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield chunk  # 原始 [DONE]
+            else:
                 yield chunk
     except Exception as e:
-        # 流中途断了，发一个错误 chunk 告知客户端
         err = f"[流式传输中断: {str(e)}]"
         error_chunk = {
             "choices": [{"delta": {"content": err}, "finish_reason": "stop", "index": 0}]
@@ -426,15 +475,19 @@ def chat_completions():
         tool_results = execute_all_tool_calls(choice["tool_calls"])
         messages.extend(tool_results)
 
+        # 构建工具执行备注，附加到最终回复，让 Chatbox 历史里保留工具上下文
+        tool_note = build_tool_context_note(choice["tool_calls"], tool_results)
+
         try:
             if want_stream:
                 stream_resp = call_llm_stream(messages)
                 return Response(
-                    stream_proxy(stream_resp),
+                    stream_proxy_with_note(stream_resp, tool_note),
                     content_type='text/event-stream; charset=utf-8'
                 )
             else:
                 second_data = call_llm_sync(messages)
+                second_data = inject_tool_note_into_response(second_data, tool_note)
                 return Response(
                     json.dumps(second_data, ensure_ascii=False),
                     content_type='application/json; charset=utf-8'
