@@ -344,6 +344,11 @@ def execute_all_tool_calls(tool_calls):
         raw_arguments = func_info.get("arguments", "{}")
         log.info(f"[TOOL_EXEC] {func_name}, raw_arguments={raw_arguments[:200]}")
         
+        # === 修复上游 API 返回的错误格式：去掉开头的 {} ===
+        if raw_arguments.startswith("{}"):
+            raw_arguments = raw_arguments[2:]
+            log.info(f"[TOOL_EXEC] 检测到并移除开头的 {{}}, 修正后: {raw_arguments[:200]}")
+        
         try:
             func_args = json.loads(raw_arguments)
             if not isinstance(func_args, dict):
