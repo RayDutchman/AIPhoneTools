@@ -866,6 +866,29 @@ if __name__ == '__main__':
             return key
         return key[:6] + "..." + key[-6:]
 
+    def _normalize_url(raw: str) -> str:
+        """
+        Auto-correct common API Base URL mistakes:
+          api.openai.com          -> https://api.openai.com
+          http://api.openai.com   -> kept as-is (user chose http)
+          https://api.openai.com/ -> https://api.openai.com  (strip trailing slash)
+          https://api.openai.com/v1 -> https://api.openai.com  (strip /v1 suffix)
+        """
+        url = raw.strip()
+        if not url:
+            return url
+        # Add https:// if no scheme present
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+        # Strip trailing slash
+        url = url.rstrip("/")
+        # Strip common path suffixes users accidentally include
+        for suffix in ("/v1", "/v1/chat", "/v1/chat/completions"):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+                break
+        return url
+
     def _fetch_models(api_base: str, api_key: str) -> list:
         """
         Call GET /v1/models on the provider and return a list of model dicts.
@@ -967,7 +990,10 @@ if __name__ == '__main__':
         while True:
             pid   = input("  Provider ID   (short tag, e.g. openai / anthropic / deepseek): ").strip() or "default"
             name  = input(f"  Display name  (e.g. OpenAI / Anthropic / DeepSeek) [{pid}]: ").strip() or pid
-            url   = input("  API Base URL  (e.g. https://api.openai.com): ").strip().rstrip("/")
+            raw_url = input("  API Base URL  (e.g. https://api.openai.com): ").strip()
+            url = _normalize_url(raw_url)
+            if url != raw_url and raw_url:
+                print(f"  [auto-corrected] -> {url}")
             key   = input("  API Key: ").strip()
             if not url or not key:
                 print("  URL and API Key are required. Try again.\n")
@@ -1074,7 +1100,10 @@ if __name__ == '__main__':
             new_key = input(f"  New API Key [{_mask_key(p.get('api_key', ''))}]: ").strip()
 
             if new_url:
-                p["api_base"] = new_url.rstrip("/")
+                normalized = _normalize_url(new_url)
+                if normalized != new_url:
+                    print(f"  [auto-corrected] -> {normalized}")
+                p["api_base"] = normalized
             if new_key:
                 p["api_key"] = new_key
 
