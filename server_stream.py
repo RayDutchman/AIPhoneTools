@@ -548,6 +548,8 @@ def chat_completions():
         ""
     )
 
+    # 提取 Chatbox 发来的 system 消息（如果有）
+    chatbox_system_msgs = [m for m in chatbox_data.get("messages", []) if m.get("role") == "system"]
     incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
     latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
     
@@ -565,14 +567,53 @@ def chat_completions():
         user_content = latest_user_msg.get("content", "")[:50]
         log.info(f"[REQUEST] latest_user_msg: {user_content}...")
 
+    # 构建 system prompt：基础说明 + memory.md + Chatbox 的 system 消息
+    system_parts = []
+    
+    # 1. 基础 system prompt
+    system_parts.append(
+        f"You are a versatile AI assistant running inside Termux on an Android phone. "
+        f"Your working directory is {DOWNLOAD_DIR}. "
+        f"Use the available tools when you need to read/write files or run commands. "
+        f"For general conversation, reply directly without calling tools unnecessarily.\n\n"
+        f"Available termux-api commands (use via execute_local_command):\n"
+        f"- termux-location: get GPS location (JSON)\n"
+        f"- termux-clipboard-get/set: read/write clipboard\n"
+        f"- termux-notification: send notification to status bar\n"
+        f"- termux-tts-speak <text>: text to speech\n"
+        f"- termux-camera-photo -c <0|1> <file>: take photo (0=back, 1=front)\n"
+        f"- termux-sms-list: list SMS messages (requires permission)\n"
+        f"- termux-toast <text>: show toast message\n"
+        f"- termux-vibrate: vibrate phone\n"
+        f"- termux-torch on|off: toggle flashlight\n"
+        f"- termux-wifi-connectioninfo: wifi connection info (JSON)\n"
+        f"- termux-battery-status: already used in get_phone_system_status\n"
+        f"See 'termux-api --help' for full list."
+    )
+    
+    # 2. 自动加载 memory.md（如果存在）
+    memory_path = os.path.join(DOWNLOAD_DIR, "memory.md")
+    if os.path.exists(memory_path):
+        try:
+            with open(memory_path, "r", encoding="utf-8") as f:
+                memory_content = f.read(2000)  # 限制 2000 字符
+            if memory_content.strip():
+                system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
+                log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
+        except Exception as e:
+            log.warning(f"[MEMORY] Failed to load memory.md: {e}")
+    
+    # 3. 合并 Chatbox 发来的 system 消息（如果有）
+    if chatbox_system_msgs:
+        for msg in chatbox_system_msgs:
+            content = msg.get("content", "").strip()
+            if content:
+                system_parts.append(f"\n\n--- User's Custom Instructions ---\n{content}")
+        log.info(f"[SYSTEM] Merged {len(chatbox_system_msgs)} system message(s) from Chatbox")
+    
     system_prompt = {
         "role": "system",
-        "content": (
-            f"You are a versatile AI assistant running inside Termux on an Android phone. "
-            f"Your working directory is {DOWNLOAD_DIR}. "
-            f"Use the available tools when you need to read/write files or run commands. "
-            f"For general conversation, reply directly without calling tools unnecessarily."
-        )
+        "content": "".join(system_parts)
     }
 
     server_history = _get_session(conv_id) if conv_id else []
