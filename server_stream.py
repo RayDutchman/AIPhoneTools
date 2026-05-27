@@ -137,13 +137,22 @@ def _get_session(conv_id: str) -> list:
 
 
 def _save_session(conv_id: str, messages: list):
-    """Save history, trimming oldest turns when SESSION_MAX_TURNS is exceeded."""
+    """
+    Save history. Trim oldest turns when SESSION_MAX_TURNS is exceeded.
+    A "turn" starts at a user message; trimming preserves complete turns
+    so we never split an assistant/tool_calls/tool_result group.
+    """
     with _sessions_lock:
         history = [m for m in messages if m.get("role") != "system"]
-        max_msgs = SESSION_MAX_TURNS * 4  # user + assistant(tool_calls) + tool + assistant
         before_trim = len(history)
-        if len(history) > max_msgs:
-            history = history[-max_msgs:]
+
+        # Find the indices of all user messages — these are turn boundaries
+        user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
+        if len(user_indices) > SESSION_MAX_TURNS:
+            # Keep only the last SESSION_MAX_TURNS turns (start at the Nth user msg from end)
+            cut_at = user_indices[-SESSION_MAX_TURNS]
+            history = history[cut_at:]
+
         _sessions[conv_id] = history
         log.info(f"[SESSION] Saved conv_id={conv_id!r}, messages: {before_trim} -> {len(history)}")
 
@@ -386,12 +395,6 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
 
     t0 = time.time()
     log.info(f"[sync] model={model_id!r}, provider={provider.get('name')}, messages={len(messages)}, tools={'yes' if tools else 'no'}")
-    if len(messages) > 1:
-        for i, msg in enumerate(messages[-3:]):
-            role = msg.get("role", "")
-            content_preview = str(msg.get("content", ""))[:80] if msg.get("content") else ""
-            has_tc = "tool_calls" in msg
-            log.info(f"  msg[{len(messages)-3+i}]: role={role}, tool_calls={has_tc}, content={content_preview}...")
     try:
         resp = requests.post(
             api_url, json=payload,
@@ -518,32 +521,6 @@ def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, cre
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
-def stream_proxy(upstream_resp):
-    """Proxy upstream SSE stream by event boundary."""
-    try:
-        for chunk in upstream_resp.iter_content(chunk_size=4096):
-            if chunk:
-                yield chunk
-    except Exception as e:
-        yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop")
-        yield b"data: [DONE]\n\n"
-    finally:
-        upstream_resp.close()
-
-
-def wrap_as_stream(data):
-    """Wrap a non-streaming response dict into a compliant SSE chunk sequence."""
-    choices = data.get("choices", [])
-    resp_id = data.get("id", "")
-    created = data.get("created", int(time.time()))
-    content = (choices[0].get("message", {}).get("content") or "") if choices else ""
-    finish_reason = (choices[0].get("finish_reason") or "stop") if choices else "stop"
-
-    yield _make_sse_chunk(content=content, resp_id=resp_id, role="assistant", created=created)
-    yield _make_sse_chunk(finish_reason=finish_reason, resp_id=resp_id, created=created)
-    yield b"data: [DONE]\n\n"
-
-
 def make_error_stream(message):
     """Wrap an error message into a valid SSE chunk sequence."""
     err_id = f"err-{int(time.time())}"
@@ -619,39 +596,37 @@ def chat_completions():
 
     messages = [system_prompt] + server_history
 
-    # ---- 非流式模式 ----
+    # ---- 非流式模式：多轮工具调用循环 ----
     if not want_stream:
+        MAX_TOOL_ROUNDS = 5
         try:
-            first_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
+            current_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
             return jsonify({"error": str(e)}), 502
 
-        choice = safe_get_choice(first_data)
+        for tool_round in range(MAX_TOOL_ROUNDS):
+            choice = safe_get_choice(current_data)
+            if not choice.get("tool_calls"):
+                break
 
-        if choice.get("tool_calls"):
             tool_calls_list = choice["tool_calls"]
-            log.info(f"[TOOL] {len(tool_calls_list)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls_list]}")
+            log.info(f"[TOOL] Round {tool_round + 1}, {len(tool_calls_list)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls_list]}")
             messages.append(choice)
             tool_results = execute_all_tool_calls(tool_calls_list)
             messages.extend(tool_results)
-
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
-            log.info("[TOOL] Sending second round request")
+
             try:
-                second_data = call_llm_sync(messages, model_id=model_id)
-                if conv_id:
-                    _save_session(conv_id, messages + [safe_get_choice(second_data)])
-                return Response(
-                    json.dumps(second_data, ensure_ascii=False),
-                    content_type='application/json; charset=utf-8'
-                )
+                current_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
             except RuntimeError as e:
                 return jsonify({"error": str(e)}), 502
+        else:
+            log.warning(f"[TOOL] Reached max tool rounds ({MAX_TOOL_ROUNDS}) in non-stream mode")
 
         if conv_id:
-            _save_session(conv_id, messages + [choice])
+            _save_session(conv_id, messages + [safe_get_choice(current_data)])
         return Response(
-            json.dumps(first_data, ensure_ascii=False),
+            json.dumps(current_data, ensure_ascii=False),
             content_type='application/json; charset=utf-8'
         )
 
@@ -678,9 +653,7 @@ def chat_completions():
                 while b"\n" in buf:
                     line_bytes, buf = buf.split(b"\n", 1)
                     line = line_bytes.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    if "[DONE]" in line:
+                    if not line.startswith("data:") or "[DONE]" in line:
                         continue
                     try:
                         data = json.loads(line[5:].strip())
@@ -748,11 +721,11 @@ def chat_completions():
             return
 
         # ---- 多轮工具调用循环 ----
-        # 每轮：执行工具 → 发 Running tools... 提示 → 请求下一轮 → 检测是否还有 tool_calls
-        # 直到 AI 不再调工具，把最终文字流式发给 Chatbox。
+        # 每轮：执行工具 → 发 Running tools... 提示 → 请求下一轮 → 实时流式转发文字
+        # 直到 AI 不再调工具，循环结束。
         MAX_TOOL_ROUNDS = 5  # 防止死循环
         tool_round = 0
-        final_collected = []
+        last_round_text = ""  # 最后一轮收到的纯文本（用于 session 保存）
 
         while tool_calls and tool_round < MAX_TOOL_ROUNDS:
             tool_round += 1
@@ -768,7 +741,7 @@ def chat_completions():
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
-            # 向 Chatbox 推送 Running tools... 提示（新 resp_id，独立消息气泡）
+            # 向 Chatbox 推送 Running tools... 提示（独立消息气泡）
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
             yield _make_sse_chunk(
@@ -787,11 +760,11 @@ def chat_completions():
                 yield from make_error_stream(str(e))
                 return
 
-            # 收集下一轮的文字和 tool_calls
+            # 收集下一轮的文字和 tool_calls；文字实时转发给 Chatbox
             next_content_parts = []
             next_tc_map = {}
             next_has_tool_calls = False
-            next_resp_id = f"chatcmpl-final-{int(time.time())}"
+            next_resp_id = ""
             next_created = int(time.time())
             next_buf = b""
 
@@ -807,16 +780,25 @@ def chat_completions():
                             continue
                         try:
                             d = json.loads(line[5:].strip())
-                            if not next_resp_id or next_resp_id.startswith("chatcmpl-final-"):
-                                next_resp_id = d.get("id", next_resp_id)
+                            if not next_resp_id:
+                                next_resp_id = d.get("id", "") or f"chatcmpl-r{tool_round}-{int(time.time())}"
                             if d.get("created"):
                                 next_created = d["created"]
                             choice0 = d.get("choices", [{}])[0]
                             delta = choice0.get("delta", {})
 
-                            # 收集 tool_calls
+                            # 收集 tool_calls（不转发；遇到第一个 tool_call 就结束当前文字消息）
                             for tc in delta.get("tool_calls", []):
                                 if not next_has_tool_calls:
+                                    # 如果已经流式发出过文字，先结束这条消息
+                                    if next_content_parts:
+                                        yield _make_sse_chunk(
+                                            finish_reason="stop",
+                                            resp_id=next_resp_id,
+                                            created=next_created,
+                                            model_id=model_id
+                                        )
+                                        yield b"data: [DONE]\n\n"
                                     next_has_tool_calls = True
                                 idx = tc.get("index", 0)
                                 if idx not in next_tc_map:
@@ -832,9 +814,16 @@ def chat_completions():
                                 if tc.get("function", {}).get("name"):
                                     next_tc_map[idx]["function"]["name"] = tc["function"]["name"]
 
-                            # 收集文字（无论是否有 tool_calls 都收集，用于下轮 content）
-                            if delta.get("content"):
+                            # 文字内容：实时转发（仅在尚未触发 tool_calls 时）
+                            if delta.get("content") and not next_has_tool_calls:
                                 next_content_parts.append(delta["content"])
+                                yield _make_sse_chunk(
+                                    content=delta["content"],
+                                    resp_id=next_resp_id,
+                                    created=next_created,
+                                    role="assistant" if len(next_content_parts) == 1 else None,
+                                    model_id=model_id
+                                )
                         except Exception:
                             pass
             except Exception as e:
@@ -846,23 +835,19 @@ def chat_completions():
 
             content = "".join(next_content_parts)
             tool_calls = [next_tc_map[i] for i in sorted(next_tc_map)] if next_tc_map else None
-            resp_id = next_resp_id
+            resp_id = next_resp_id or resp_id
             resp_created = next_created
-            final_collected = next_content_parts
+            last_round_text = content
 
-        # 循环结束：把最终文字流式发给 Chatbox
-        if final_collected:
-            final_text = "".join(final_collected)
-            yield _make_sse_chunk(content=final_text, resp_id=resp_id, created=resp_created,
-                                  role="assistant", model_id=model_id)
-        elif tool_round >= MAX_TOOL_ROUNDS:
+        # 循环结束
+        if tool_round >= MAX_TOOL_ROUNDS and tool_calls:
             log.warning(f"[TOOL] Reached max tool rounds ({MAX_TOOL_ROUNDS}), stopping")
-            yield _make_sse_chunk(content="[工具调用轮次已达上限，停止执行]",
+            yield _make_sse_chunk(content="\n\n[工具调用轮次已达上限，停止执行]",
                                   resp_id=resp_id, created=resp_created,
-                                  role="assistant", model_id=model_id)
+                                  model_id=model_id)
 
         if conv_id:
-            _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(final_collected)}])
+            _save_session(conv_id, messages + [{"role": "assistant", "content": last_round_text}])
 
         yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
         yield b"data: [DONE]\n\n"
