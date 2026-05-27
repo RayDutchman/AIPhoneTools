@@ -26,6 +26,8 @@ DOWNLOAD_DIR = os.path.expanduser("~")
 TOOL_OUTPUT_MAX_CHARS = 8000
 # Max turns to keep in session history (one turn = one user + one assistant message)
 SESSION_MAX_TURNS = 20
+# Global memory file (shared across all sessions)
+GLOBAL_MEMORY_PATH = os.path.join(DOWNLOAD_DIR, "memory.md")
 
 # ==== 1b. Multi-model config loading ====
 # Load models_config.json on startup; fall back to an empty template if missing.
@@ -268,6 +270,43 @@ def get_phone_system_status():
         return f"Error: Failed to get system status. Reason: {str(e)}"
 
 
+def update_global_memory(content, mode="append"):
+    """
+    Update global memory (memory.md) shared across all sessions.
+    Use this to save important information that should persist across conversations.
+    
+    Args:
+        content: Content to write
+        mode: "append" (add to end), "prepend" (add to start), or "replace" (overwrite)
+    """
+    try:
+        if mode == "replace":
+            with open(GLOBAL_MEMORY_PATH, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"Success: Global memory replaced with {len(content)} chars"
+        
+        # Read existing content
+        existing = ""
+        if os.path.exists(GLOBAL_MEMORY_PATH):
+            with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
+                existing = f.read()
+        
+        # Append or prepend
+        if mode == "append":
+            new_content = existing + "\n\n" + content if existing else content
+        elif mode == "prepend":
+            new_content = content + "\n\n" + existing if existing else content
+        else:
+            return f"Error: Invalid mode '{mode}'. Use 'append', 'prepend', or 'replace'"
+        
+        with open(GLOBAL_MEMORY_PATH, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        
+        return f"Success: Global memory updated ({mode}), total {len(new_content)} chars"
+    except Exception as e:
+        return f"Error: Failed to update global memory. Reason: {str(e)}"
+
+
 tools_map = {
     "read_phone_file": read_phone_file,
     "write_phone_file": write_phone_file,
@@ -275,6 +314,7 @@ tools_map = {
     "list_phone_dir": list_phone_dir,
     "search_phone_files": search_phone_files,
     "get_phone_system_status": get_phone_system_status,
+    "update_global_memory": update_global_memory,
 }
 
 tools_schema = [
@@ -360,6 +400,25 @@ tools_schema = [
             "name": "get_phone_system_status",
             "description": "Get current phone storage, memory usage and battery status",
             "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_global_memory",
+            "description": "Update global memory (memory.md) shared across all conversations. Use this to save important information that should persist across sessions, like user preferences, project info, or learned facts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Content to add or replace in global memory"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["append", "prepend", "replace"],
+                        "description": "How to update: 'append' (add to end, default), 'prepend' (add to start), 'replace' (overwrite all)"
+                    }
+                },
+                "required": ["content"]
+            }
         }
     }
 ]
