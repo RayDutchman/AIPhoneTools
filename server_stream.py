@@ -747,68 +747,123 @@ def chat_completions():
             yield b"data: [DONE]\n\n"
             return
 
-        # Tool calls detected: execute tools and stream second round
-        log.info(f"[TOOL] {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}")
+        # ---- 多轮工具调用循环 ----
+        # 每轮：执行工具 → 发 Running tools... 提示 → 请求下一轮 → 检测是否还有 tool_calls
+        # 直到 AI 不再调工具，把最终文字流式发给 Chatbox。
+        MAX_TOOL_ROUNDS = 5  # 防止死循环
+        tool_round = 0
+        final_collected = []
 
-        assistant_msg = {
-            "role": "assistant",
-            "content": content or None,
-            "tool_calls": tool_calls
-        }
-        messages.append(assistant_msg)
-        tool_results = execute_all_tool_calls(tool_calls)
-        messages.extend(tool_results)
+        while tool_calls and tool_round < MAX_TOOL_ROUNDS:
+            tool_round += 1
+            log.info(f"[TOOL] Round {tool_round}, {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}")
 
-        log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
-        log.info("[stream] Sending second round stream request")
+            # 把本轮 assistant 消息（含 tool_calls）和工具结果追加到 messages
+            messages.append({
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": tool_calls
+            })
+            tool_results = execute_all_tool_calls(tool_calls)
+            messages.extend(tool_results)
+            log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
-        try:
-            second_resp = call_llm_stream(messages, model_id=model_id)
-        except RuntimeError as e:
-            yield from make_error_stream(str(e))
-            return
+            # 向 Chatbox 推送 Running tools... 提示（新 resp_id，独立消息气泡）
+            tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
+            tool_created = int(time.time())
+            yield _make_sse_chunk(
+                content=f"Running tools...\n\n",
+                resp_id=tool_resp_id, created=tool_created,
+                role="assistant", model_id=model_id
+            )
+            yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
+            yield b"data: [DONE]\n\n"
 
-        # 第二轮：续在同一个 resp_id 下，只转发纯文本 content，
-        # 过滤掉任何 tool_calls 字段，Chatbox 感知不到工具调用的存在。
-        collected = []
-        buf2 = b""
-        try:
-            for chunk in second_resp.iter_content(chunk_size=4096):
-                if not chunk:
-                    continue
-                buf2 += chunk
-                while b"\n" in buf2:
-                    line_bytes, buf2 = buf2.split(b"\n", 1)
-                    line = line_bytes.decode("utf-8", errors="replace").strip()
-                    if not line:
+            # 发起下一轮请求（带工具定义，AI 可能继续调工具）
+            log.info(f"[stream] Sending round {tool_round + 1} request, messages={len(messages)}")
+            try:
+                next_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
+            except RuntimeError as e:
+                yield from make_error_stream(str(e))
+                return
+
+            # 收集下一轮的文字和 tool_calls
+            next_content_parts = []
+            next_tc_map = {}
+            next_has_tool_calls = False
+            next_resp_id = f"chatcmpl-final-{int(time.time())}"
+            next_created = int(time.time())
+            next_buf = b""
+
+            try:
+                for chunk in next_resp.iter_content(chunk_size=4096):
+                    if not chunk:
                         continue
-                    if line == "data: [DONE]":
-                        continue
-                    if line.startswith("data:"):
+                    next_buf += chunk
+                    while b"\n" in next_buf:
+                        line_bytes, next_buf = next_buf.split(b"\n", 1)
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:") or "[DONE]" in line:
+                            continue
                         try:
                             d = json.loads(line[5:].strip())
-                            delta = d.get("choices", [{}])[0].get("delta", {})
-                            finish = d.get("choices", [{}])[0].get("finish_reason")
-                            text = delta.get("content")
-                            if text:
-                                collected.append(text)
-                                # 用原始 resp_id 转发，让 Chatbox 视为同一条消息的续流
-                                yield _make_sse_chunk(
-                                    content=text,
-                                    resp_id=resp_id, created=resp_created,
-                                    model_id=model_id
-                                )
+                            if not next_resp_id or next_resp_id.startswith("chatcmpl-final-"):
+                                next_resp_id = d.get("id", next_resp_id)
+                            if d.get("created"):
+                                next_created = d["created"]
+                            choice0 = d.get("choices", [{}])[0]
+                            delta = choice0.get("delta", {})
+
+                            # 收集 tool_calls
+                            for tc in delta.get("tool_calls", []):
+                                if not next_has_tool_calls:
+                                    next_has_tool_calls = True
+                                idx = tc.get("index", 0)
+                                if idx not in next_tc_map:
+                                    next_tc_map[idx] = {
+                                        "id": tc.get("id", ""),
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""}
+                                    }
+                                next_tc_map[idx]["function"]["arguments"] += \
+                                    tc.get("function", {}).get("arguments", "")
+                                if tc.get("id"):
+                                    next_tc_map[idx]["id"] = tc["id"]
+                                if tc.get("function", {}).get("name"):
+                                    next_tc_map[idx]["function"]["name"] = tc["function"]["name"]
+
+                            # 收集文字（无论是否有 tool_calls 都收集，用于下轮 content）
+                            if delta.get("content"):
+                                next_content_parts.append(delta["content"])
                         except Exception:
                             pass
-        except Exception as e:
-            yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop", model_id=model_id)
-            yield b"data: [DONE]\n\n"
-        finally:
-            second_resp.close()
-            if conv_id:
-                _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(collected)}])
+            except Exception as e:
+                yield _make_sse_chunk(content=f"[stream interrupted: {str(e)}]", finish_reason="stop", model_id=model_id)
+                yield b"data: [DONE]\n\n"
+                return
+            finally:
+                next_resp.close()
 
-        # 第二轮结束，发送最终 stop
+            content = "".join(next_content_parts)
+            tool_calls = [next_tc_map[i] for i in sorted(next_tc_map)] if next_tc_map else None
+            resp_id = next_resp_id
+            resp_created = next_created
+            final_collected = next_content_parts
+
+        # 循环结束：把最终文字流式发给 Chatbox
+        if final_collected:
+            final_text = "".join(final_collected)
+            yield _make_sse_chunk(content=final_text, resp_id=resp_id, created=resp_created,
+                                  role="assistant", model_id=model_id)
+        elif tool_round >= MAX_TOOL_ROUNDS:
+            log.warning(f"[TOOL] Reached max tool rounds ({MAX_TOOL_ROUNDS}), stopping")
+            yield _make_sse_chunk(content="[工具调用轮次已达上限，停止执行]",
+                                  resp_id=resp_id, created=resp_created,
+                                  role="assistant", model_id=model_id)
+
+        if conv_id:
+            _save_session(conv_id, messages + [{"role": "assistant", "content": "".join(final_collected)}])
+
         yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
         yield b"data: [DONE]\n\n"
 
