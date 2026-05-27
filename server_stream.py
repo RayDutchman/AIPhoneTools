@@ -4,7 +4,6 @@ import json
 import time
 import shutil
 import logging
-import threading
 import subprocess
 import requests
 from flask import Flask, request, jsonify, Response
@@ -24,8 +23,6 @@ DOWNLOAD_DIR = os.path.expanduser("~")
 
 # Max chars for tool output, truncate if exceeded
 TOOL_OUTPUT_MAX_CHARS = 8000
-# Max turns to keep in session history (one turn = one user + one assistant message)
-SESSION_MAX_TURNS = 20
 # Global memory file (shared across all sessions)
 GLOBAL_MEMORY_PATH = os.path.join(DOWNLOAD_DIR, "memory.md")
 
@@ -103,66 +100,6 @@ def get_provider_for_model(model_id: str):
 
 def get_default_model_id() -> str:
     return MODELS_CONFIG.get("default_model", "claude-sonnet-4-6")
-
-
-# ==== 2. Session History Management ====
-# Use conversation_id (unique per Chatbox conversation) as key
-# Store complete messages list, including tool_calls and tool results
-_sessions: dict = {}
-_sessions_lock = threading.Lock()
-
-
-def _get_session(conv_id: str) -> list:
-    with _sessions_lock:
-        history = list(_sessions.get(conv_id, []))
-
-    # Clean up orphaned tool_calls at the end of session history.
-    # If the last message is an assistant message with tool_calls but no following
-    # tool result, the previous execution was interrupted (Chatbox interception or
-    # network error). Trim the dangling tail to prevent infinite retry loops.
-    cleaned = list(history)
-    while cleaned:
-        last = cleaned[-1]
-        if last.get("role") == "assistant" and last.get("tool_calls"):
-            log.warning(f"[SESSION] Orphaned tool_calls detected, cleaning conv_id={conv_id!r}")
-            cleaned.pop()
-        elif last.get("role") == "tool":
-            # tool result without a following assistant reply — also trim
-            cleaned.pop()
-        else:
-            break
-    if len(cleaned) != len(history):
-        log.warning(f"[SESSION] Removed {len(history) - len(cleaned)} orphaned message(s)")
-        with _sessions_lock:
-            _sessions[conv_id] = cleaned
-    return cleaned
-
-
-def _save_session(conv_id: str, messages: list):
-    """
-    Save history. Trim oldest turns when SESSION_MAX_TURNS is exceeded.
-    A "turn" starts at a user message; trimming preserves complete turns
-    so we never split an assistant/tool_calls/tool_result group.
-    """
-    with _sessions_lock:
-        history = [m for m in messages if m.get("role") != "system"]
-        before_trim = len(history)
-
-        # Find the indices of all user messages — these are turn boundaries
-        user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
-        if len(user_indices) > SESSION_MAX_TURNS:
-            # Keep only the last SESSION_MAX_TURNS turns (start at the Nth user msg from end)
-            cut_at = user_indices[-SESSION_MAX_TURNS]
-            history = history[cut_at:]
-
-        _sessions[conv_id] = history
-        log.info(f"[SESSION] Saved conv_id={conv_id!r}, messages: {before_trim} -> {len(history)}")
-
-
-def _clear_session(conv_id: str):
-    with _sessions_lock:
-        _sessions.pop(conv_id, None)
-
 
 
 # ==== 3. Tool Functions ====
@@ -598,33 +535,14 @@ def chat_completions():
     # Extract model_id, use default if not specified
     model_id = (chatbox_data.get("model") or get_default_model_id()).strip()
 
-    # Enhanced conv_id extraction (try multiple field names)
-    conv_id = (
-        chatbox_data.get("conversation_id") or 
-        chatbox_data.get("id") or 
-        chatbox_data.get("conversationId") or
-        chatbox_data.get("session_id") or
-        ""
-    )
-
-    # Extract system message from Chatbox (if any)
+    # Separate system messages from conversation history
     chatbox_system_msgs = [m for m in chatbox_data.get("messages", []) if m.get("role") == "system"]
     incoming = [m for m in chatbox_data.get("messages", []) if m.get("role") != "system"]
+
     latest_user_msg = next((m for m in reversed(incoming) if m["role"] == "user"), None)
-    
-    # If conv_id still empty, use hash of user message as fallback
-    if not conv_id and incoming:
-        import hashlib
-        first_user = next((m for m in incoming if m.get("role") == "user"), None)
-        if first_user:
-            conv_id = "fallback-" + hashlib.md5(
-                str(first_user.get("content", ""))[:100].encode()
-            ).hexdigest()[:8]
-    
-    log.info(f"[REQUEST] conv_id={conv_id!r}, model={model_id!r}, stream={want_stream}, incoming_msgs={len(incoming)}")
+    log.info(f"[REQUEST] model={model_id!r}, stream={want_stream}, messages={len(incoming)}")
     if latest_user_msg:
-        user_content = latest_user_msg.get("content", "")[:50]
-        log.info(f"[REQUEST] latest_user_msg: {user_content}...")
+        log.info(f"[REQUEST] latest_user: {latest_user_msg.get('content', '')[:50]}...")
 
     # Build system prompt: base instructions + memory.md + Chatbox system message
     system_parts = []
@@ -677,26 +595,11 @@ def chat_completions():
         "content": "".join(system_parts)
     }
 
-    server_history = _get_session(conv_id) if conv_id else []
-
-    # Check recent history to avoid appending duplicate user messages
-    # (e.g. when the user resends the same message multiple times)
-    if latest_user_msg:
-        latest_content = latest_user_msg.get("content", "")
-        recent = server_history[-6:] if len(server_history) >= 6 else server_history
-        already_in_history = any(
-            m.get("role") == "user" and m.get("content", "") == latest_content
-            for m in recent
-        )
-        if not already_in_history:
-            server_history.append(latest_user_msg)
-            log.info("[SESSION] Appended new user message")
-        else:
-            log.info("[SESSION] Duplicate user message detected, skipping append")
-
-    log.info(f"[SESSION] history_length={len(server_history)}")
-
-    messages = [system_prompt] + server_history
+    # Use history from Chatbox (stateless server design)
+    # Chatbox sends complete conversation history in each request
+    messages = [system_prompt] + incoming
+    
+    log.info(f"[SESSION] Using Chatbox history, messages={len(incoming)}")
 
     # ---- Non-streaming mode: multi-round tool calling loop ----
     if not want_stream:
@@ -725,8 +628,7 @@ def chat_completions():
         else:
             log.warning(f"[TOOL] Reached max tool rounds ({MAX_TOOL_ROUNDS}) in non-stream mode")
 
-        if conv_id:
-            _save_session(conv_id, messages + [safe_get_choice(current_data)])
+        # Session managed by Chatbox (stateless server)
         return Response(
             json.dumps(current_data, ensure_ascii=False),
             content_type='application/json; charset=utf-8'
@@ -817,8 +719,7 @@ def chat_completions():
 
         if not tool_calls:
             log.info("[stream] No tool calls, done")
-            if conv_id:
-                _save_session(conv_id, messages + [{"role": "assistant", "content": content}])
+            # Session managed by Chatbox (stateless server)
             yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
             return
@@ -1066,9 +967,7 @@ def chat_completions():
                 resp_id = summary_resp_id
                 resp_created = summary_created
 
-        if conv_id:
-            _save_session(conv_id, messages + [{"role": "assistant", "content": last_round_text}])
-
+        # Session managed by Chatbox (stateless server)
         yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
         yield b"data: [DONE]\n\n"
 
@@ -1096,21 +995,6 @@ def list_models():
             "owned_by": "termux-agent"
         })
     return jsonify({"object": "list", "data": models})
-
-
-@app.route('/v1/sessions', methods=['DELETE'])
-def clear_sessions():
-    """Clear all session history (debug use)."""
-    with _sessions_lock:
-        _sessions.clear()
-    return jsonify({"status": "ok", "message": "All sessions cleared"})
-
-
-@app.route('/v1/sessions/<conv_id>', methods=['DELETE'])
-def clear_session(conv_id):
-    """Clear a specific session."""
-    _clear_session(conv_id)
-    return jsonify({"status": "ok", "message": f"Session {conv_id} cleared"})
 
 
 if __name__ == '__main__':
