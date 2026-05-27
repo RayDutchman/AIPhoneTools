@@ -1,0 +1,43 @@
+{
+  "providers": {
+    "lmuai": {
+      "name": "LMU AI",
+      "api_base": "https://api.lmuai.com",
+      "api_key": "sk-9b7a62c8cee0aa73203584c7f2d39d1e0adb507dd7c90b8f34f9bbf073a966f7",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "claude-3-5-sonnet-20241022",
+          "name": "Claude 3.5 Sonnet",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "supports_tools": true,
+          "max_tokens": 8192
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek Chat",
+          "supports_tools": true,
+          "max_tokens": 8192
+        }
+      ]
+    }
+  },
+  "default_provider": "lmuai",
+  "default_model": "claude-sonnet-4-6"
+}

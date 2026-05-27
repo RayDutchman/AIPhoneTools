@@ -1,5 +1,4 @@
 # 含真实 API Key 的配置文件，不提交到 Git
-models_config.json
 
 # Python 缓存
 __pycache__/
