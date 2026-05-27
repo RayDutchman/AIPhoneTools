@@ -127,7 +127,9 @@ def read_phone_file(filename):
 def write_phone_file(filename, content):
     path = os.path.join(DOWNLOAD_DIR, filename)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return f"Success: Saved to {path}"
@@ -571,10 +573,9 @@ def chat_completions():
     )
     
     # 2. Auto-load memory.md (if exists)
-    memory_path = os.path.join(DOWNLOAD_DIR, "memory.md")
-    if os.path.exists(memory_path):
+    if os.path.exists(GLOBAL_MEMORY_PATH):
         try:
-            with open(memory_path, "r", encoding="utf-8") as f:
+            with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
                 memory_content = f.read(2000)  # Limit to 2000 chars
             if memory_content.strip():
                 system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
@@ -598,8 +599,8 @@ def chat_completions():
     # Use history from Chatbox (stateless server design)
     # Chatbox sends complete conversation history in each request
     messages = [system_prompt] + incoming
-    
-    log.info(f"[SESSION] Using Chatbox history, messages={len(incoming)}")
+
+    log.info(f"[REQUEST] history={len(incoming)} messages")
 
     # ---- Non-streaming mode: multi-round tool calling loop ----
     if not want_stream:
@@ -732,7 +733,6 @@ def chat_completions():
         # Chatbox default total timeout ~60-90s; leave 15s margin for final summary generation
         BUDGET_SECONDS = 50
         tool_round = 0
-        last_round_text = ""  # Plain text received in last round (for session save)
         budget_exceeded = False  # Flag whether interrupted by time budget
 
         while tool_calls and tool_round < MAX_TOOL_ROUNDS:
@@ -906,7 +906,6 @@ def chat_completions():
             tool_calls = [next_tc_map[i] for i in sorted(next_tc_map)] if next_tc_map else None
             resp_id = next_resp_id or resp_id
             resp_created = next_created
-            last_round_text = content
 
         # Loop ended
         if tool_round >= MAX_TOOL_ROUNDS and tool_calls:
@@ -963,7 +962,6 @@ def chat_completions():
                                           model_id=model_id)
                 finally:
                     summary_resp.close()
-                last_round_text = "".join(summary_collected)
                 resp_id = summary_resp_id
                 resp_created = summary_created
 
