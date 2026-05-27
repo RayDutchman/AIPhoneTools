@@ -152,7 +152,7 @@ def cmd_add_provider():
     cfg = load_config()
     print("\n=== Add New API Provider ===\n")
 
-    pid = prompt("Provider ID (e.g. openai, anthropic, lmuai)")
+    pid = prompt("Provider ID (e.g. openai, anthropic, openai)")
     if not pid:
         print("Cancelled")
         return

@@ -6,20 +6,20 @@
       "api_key": "YOUR_API_KEY_HERE",
       "models": [
         {
-          "id": "gpt-5.4",
-          "name": "GPT-5.4",
+          "id": "gpt-4o",
+          "name": "GPT-4o",
           "supports_tools": true,
           "max_tokens": 8192
         },
         {
-          "id": "gpt-4o",
-          "name": "GPT-4o",
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
           "supports_tools": true,
           "max_tokens": 8192
         }
       ]
     }
   },
-  "default_provider": "OpenAI",
-  "default_model": "gpt-5.4"
+  "default_provider": "openai",
+  "default_model": "gpt-4o"
 }

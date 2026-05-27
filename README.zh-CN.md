@@ -56,9 +56,9 @@ nano models_config.json  # 或用其他编辑器
 ```json
 {
   "providers": {
-    "lmuai": {
-      "name": "LMU AI",
-      "api_base": "https://api.lmuai.com",
+    "openai": {
+      "name": "OpenAI",
+      "api_base": "https://api.openai.com",
       "api_key": "sk-your-key-here",
       "models": [
         {
@@ -70,7 +70,7 @@ nano models_config.json  # 或用其他编辑器
       ]
     }
   },
-  "default_provider": "lmuai",
+  "default_provider": "openai",
   "default_model": "claude-sonnet-4-6"
 }
 ```
