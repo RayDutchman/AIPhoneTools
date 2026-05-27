@@ -772,15 +772,12 @@ def chat_completions():
             tool_round += 1
             log.info(f"[TOOL] Round {tool_round}, {len(tool_calls)} call(s): {[tc.get('function',{}).get('name') for tc in tool_calls]}")
 
-            # 把本轮 assistant 消息（含 tool_calls）和工具结果追加到 messages
+            # 把本轮 assistant 消息（含 tool_calls）追加到 messages
             messages.append({
                 "role": "assistant",
                 "content": content or None,
                 "tool_calls": tool_calls
             })
-            tool_results = execute_all_tool_calls(tool_calls)
-            messages.extend(tool_results)
-            log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
             # 向 Chatbox 推送工具调用提示（独立消息气泡，按调用顺序列出所有工具名）
             tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
@@ -793,6 +790,70 @@ def chat_completions():
                 resp_id=tool_resp_id, created=tool_created,
                 role="assistant", model_id=model_id
             )
+
+            # 逐个执行工具，每执行完一个就发送进度更新（防止 timeout）
+            tool_results = []
+            for idx, tool_call in enumerate(tool_calls, 1):
+                func_info = tool_call.get("function", {})
+                func_name = func_info.get("name", "")
+                tool_call_id = tool_call.get("id", "unknown")
+
+                raw_arguments = func_info.get("arguments", "")
+                log.info(f"[TOOL_EXEC] {func_name} args={raw_arguments[:200]}")
+
+                # Fix malformed upstream API response: strip leading '{}'
+                if raw_arguments.startswith("{}"):
+                    raw_arguments = raw_arguments[2:]
+                    log.info(f"[TOOL_EXEC] Stripped leading {{}} from arguments")
+
+                # 空参数直接用 {}，不走 JSON 解析（避免无意义的 WARNING）
+                if not raw_arguments.strip():
+                    func_args = {}
+                else:
+                    try:
+                        func_args = json.loads(raw_arguments)
+                        if not isinstance(func_args, dict):
+                            func_args = {}
+                    except json.JSONDecodeError as e:
+                        log.warning(f"[TOOL_EXEC] JSON parse failed: {e}, raw={raw_arguments[:100]!r}")
+                        func_args = {}
+
+                if not func_name:
+                    result = "Error: empty tool name"
+                elif func_name in tools_map:
+                    try:
+                        result = tools_map[func_name](**func_args)
+                    except TypeError as e:
+                        result = f"Error: argument mismatch ({str(e)}), received: {func_args}"
+                    except Exception as e:
+                        result = f"Error: tool execution failed: {str(e)}"
+                else:
+                    result = f"Error: unknown tool '{func_name}'"
+
+                result_str = str(result)
+                if len(result_str) > TOOL_OUTPUT_MAX_CHARS:
+                    result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[truncated]"
+
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": func_name,
+                    "content": result_str,
+                })
+
+                # 每执行完一个工具，发送进度更新（防止 Chatbox timeout）
+                if idx < len(tool_calls):
+                    progress = f"✓ {idx}/{len(tool_calls)}"
+                    yield _make_sse_chunk(
+                        content=progress,
+                        resp_id=tool_resp_id, created=tool_created,
+                        model_id=model_id
+                    )
+
+            messages.extend(tool_results)
+            log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
+
+            # 结束工具执行提示消息
             yield _make_sse_chunk(finish_reason="stop", resp_id=tool_resp_id, created=tool_created, model_id=model_id)
             yield b"data: [DONE]\n\n"
 
