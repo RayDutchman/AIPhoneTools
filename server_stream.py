@@ -27,30 +27,18 @@ TOOL_OUTPUT_MAX_CHARS = 8000
 # session 历史最多保留的轮数（一轮 = 一条 user + 一条 assistant）
 SESSION_MAX_TURNS = 20
 
-# ==== 1b. 多模型配置加载 ====
-# 优先读取 models_config.json，不存在时回退到硬编码默认值
+# ==== 1b. Multi-model config loading ====
+# Load models_config.json on startup; fall back to an empty template if missing.
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
 
-# 硬编码兜底配置（models_config.json 不存在时使用）
+# Empty template — no hardcoded provider or key.
+# If models_config.json is missing, the startup prompt will force the user
+# to enter a URL and API key before the server starts.
 _FALLBACK_CONFIG = {
-    "providers": {
-        "lmuai": {
-            "name": "LMU AI",
-            "api_base": "https://api.lmuai.com",
-            "api_key": "",
-            "models": [
-                {
-                    "id": "claude-sonnet-4-6",
-                    "name": "Claude Sonnet 4.6",
-                    "supports_tools": True,
-                    "max_tokens": 8192
-                }
-            ]
-        }
-    },
-    "default_provider": "lmuai",
-    "default_model": "claude-sonnet-4-6"
+    "providers": {},
+    "default_provider": "",
+    "default_model": ""
 }
 
 
@@ -92,6 +80,8 @@ def get_provider_for_model(model_id: str):
         {"id": default_model_id, "supports_tools": True, "max_tokens": 8192}
     )
     log.warning(f"[CONFIG] Model {model_id!r} not found, falling back to default: {default_model_id!r}")
+    if not default_provider.get("api_key", "").strip():
+        log.error("[CONFIG] Default provider has no API key — requests will fail")
     return default_provider, default_model
 
 
@@ -953,13 +943,50 @@ if __name__ == '__main__':
             print(f"  Default model updated to: {cfg['default_model']}")
         return cfg
 
+    def _add_provider_interactive(cfg: dict) -> dict:
+        """
+        Interactively add a new provider. Used when no valid provider exists.
+        Loops until the user provides a non-empty URL and API key.
+        """
+        print()
+        print("  No valid provider found. Please configure one now.")
+        print("  -----------------------------------------------")
+        while True:
+            pid   = input("  Provider ID (e.g. lmuai, openai): ").strip() or "default"
+            name  = input(f"  Display name [{pid}]: ").strip() or pid
+            url   = input("  API Base URL (e.g. https://api.openai.com): ").strip().rstrip("/")
+            key   = input("  API Key: ").strip()
+            if not url or not key:
+                print("  URL and API Key are required. Try again.\n")
+                continue
+            cfg["providers"][pid] = {
+                "name": name,
+                "api_base": url,
+                "api_key": key,
+                "models": []
+            }
+            cfg["default_provider"] = pid
+            cfg["default_model"] = ""
+            _save_config(cfg)
+            print(f"  Provider '{name}' saved.")
+            break
+        return cfg
+
     def _startup_prompt():
         """
         Show config info, fetch live model lists, and ask the user to confirm
         before starting the server. Auto-continues after 10 seconds of no input.
+        If no provider is configured or all keys are empty, forces the user to
+        add one before proceeding.
         Returns the final cfg (possibly modified by the user).
         """
         cfg = _load_models_config()
+
+        # Force setup if there are no providers or every provider has an empty key
+        providers = cfg.get("providers", {})
+        has_valid = any(p.get("api_key", "").strip() for p in providers.values())
+        if not providers or not has_valid:
+            cfg = _add_provider_interactive(cfg)
 
         while True:
             # Fetch live model lists for all providers
@@ -969,6 +996,14 @@ if __name__ == '__main__':
             print("=" * 55)
             cfg = _refresh_all_models(cfg)
             _save_config(cfg)
+
+            # If fetch returned nothing for every provider, warn but don't block
+            all_models = [
+                m for p in cfg.get("providers", {}).values()
+                for m in p.get("models", [])
+            ]
+            if not all_models:
+                print("  [warn] No models fetched. Check your URL and API key.")
 
             print()
             print("=" * 55)
@@ -1003,8 +1038,8 @@ if __name__ == '__main__':
             pids = list(providers.keys())
 
             if not pids:
-                print("  No providers to edit, starting anyway")
-                break
+                cfg = _add_provider_interactive(cfg)
+                continue
             elif len(pids) == 1:
                 pid = pids[0]
             else:
