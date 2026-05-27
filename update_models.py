@@ -18,7 +18,7 @@ import json
 import time
 import requests
 
-# Config file path (same directory as server_stream.py)
+# Config file path (same directory as server.py)
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
 
 # Default empty config structure

@@ -79,10 +79,10 @@ nano models_config.json  # 或用其他编辑器
 
 ```bash
 # 前台运行（测试用）
-python server_stream.py
+python server.py
 
 # 后台运行（推荐）
-nohup python server_stream.py > ~/server.log 2>&1 &
+nohup python server.py > ~/server.log 2>&1 &
 
 # 查看日志
 tail -f ~/server.log
@@ -152,8 +152,8 @@ python update_models.py set-default   # 设置默认模型
 修改配置后重启服务：
 
 ```bash
-pkill -f server_stream.py
-nohup python server_stream.py > ~/server.log 2>&1 &
+pkill -f server.py
+nohup python server.py > ~/server.log 2>&1 &
 ```
 
 ## 💡 高级功能
@@ -173,7 +173,7 @@ echo "# 我的记忆\n\n- 我喜欢用 Python\n- 我的项目在 ~/projects" > ~
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
 cd ~/Termux-Agent-Server
-nohup python server_stream.py > ~/server.log 2>&1 &
+nohup python server.py > ~/server.log 2>&1 &
 echo "Server started. Log: tail -f ~/server.log"
 ```
 
@@ -200,7 +200,7 @@ ssh -p 8022 u0_aXXX@手机IP
 
 ```bash
 # 确认服务运行
-ps aux | grep server_stream.py
+ps aux | grep server.py
 
 # 确认 IP 地址
 hostname -I
@@ -258,7 +258,7 @@ OpenAI 兼容的聊天接口。
 
 ## ⚙️ 配置选项
 
-在 `server_stream.py` 顶部：
+在 `server.py` 顶部：
 
 ```python
 DOWNLOAD_DIR = os.path.expanduser("~")  # 工作目录
@@ -269,7 +269,7 @@ TOOL_OUTPUT_MAX_CHARS = 8000            # 工具输出限制
 
 ```
 Termux-Agent-Server/
-├── server_stream.py              # 主服务器
+├── server.py              # 主服务器
 ├── update_models.py              # 模型管理工具
 ├── models_config.json            # API 配置（不提交）
 ├── models_config.example.json    # 配置模板

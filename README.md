@@ -77,10 +77,10 @@ nano models_config.json  # or use other editor
 
 ```bash
 # Foreground (for testing)
-python server_stream.py
+python server.py
 
 # Background (production)
-nohup python server_stream.py > ~/server.log 2>&1 &
+nohup python server.py > ~/server.log 2>&1 &
 
 # View logs
 tail -f ~/server.log
@@ -152,8 +152,8 @@ python update_models.py set-default   # Set default model
 ### Restart Server
 
 ```bash
-pkill -f server_stream.py
-nohup python server_stream.py > ~/server.log 2>&1 &
+pkill -f server.py
+nohup python server.py > ~/server.log 2>&1 &
 ```
 
 ### Long-Term Memory
@@ -171,7 +171,7 @@ Create `~/start_server.sh`:
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
 cd ~/Termux-Agent-Server
-nohup python server_stream.py > ~/server.log 2>&1 &
+nohup python server.py > ~/server.log 2>&1 &
 echo "Server started. Log: tail -f ~/server.log"
 ```
 
@@ -197,7 +197,7 @@ ssh -p 8022 u0_aXXX@phone-ip
 
 ```bash
 # Check if server is running
-ps aux | grep server_stream.py
+ps aux | grep server.py
 
 # Confirm IP address
 hostname -I
@@ -255,7 +255,7 @@ Clear specific session.
 
 ## Configuration
 
-In `server_stream.py` header:
+In `server.py` header:
 
 ```python
 DOWNLOAD_DIR = os.path.expanduser("~")  # Working directory
@@ -266,7 +266,7 @@ TOOL_OUTPUT_MAX_CHARS = 8000            # Tool output limit
 
 ```
 Termux-Agent-Server/
-├── server_stream.py              # Main server
+├── server.py              # Main server
 ├── update_models.py              # Model management tool
 ├── models_config.json            # API config (not committed)
 ├── models_config.example.json    # Config template
