@@ -576,6 +576,8 @@ def chat_completions():
         f"Your working directory is {DOWNLOAD_DIR}. "
         f"Use the available tools when you need to read/write files or run commands. "
         f"For general conversation, reply directly without calling tools unnecessarily.\n\n"
+        f"IMPORTANT: Call at most 3 tools per round. If you need more, do them in subsequent rounds. "
+        f"This prevents client-side timeout. Single-round latency must stay under ~50 seconds.\n\n"
         f"Available termux-api commands (use via execute_local_command):\n"
         f"- termux-location: get GPS location (JSON)\n"
         f"- termux-clipboard-get/set: read/write clipboard\n"
@@ -781,7 +783,17 @@ def chat_completions():
 
             # 向 Chatbox 推送工具调用提示（独立消息气泡，按调用顺序列出所有工具名）
             tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
-            tool_display = ", ".join(tool_names)
+            # 同名连续合并：cmd, cmd, cmd, list -> cmd ×3, list
+            display_parts = []
+            i = 0
+            while i < len(tool_names):
+                name = tool_names[i]
+                count = 1
+                while i + count < len(tool_names) and tool_names[i + count] == name:
+                    count += 1
+                display_parts.append(f"{name}" + (f" ×{count}" if count > 1 else ""))
+                i += count
+            tool_display = ", ".join(display_parts)
 
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
             tool_created = int(time.time())
@@ -843,7 +855,7 @@ def chat_completions():
 
                 # 每执行完一个工具，发送进度更新（防止 Chatbox timeout）
                 if idx < len(tool_calls):
-                    progress = f"✓ {idx}/{len(tool_calls)}"
+                    progress = f"  ✓ {idx}/{len(tool_calls)} {func_name}\n"
                     yield _make_sse_chunk(
                         content=progress,
                         resp_id=tool_resp_id, created=tool_created,
