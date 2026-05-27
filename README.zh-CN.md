@@ -17,7 +17,9 @@
 
 ### 1. 安装 Termux
 
-从 [F-Droid](https://f-droid.org/packages/com.termux/) 或 [GitHub Releases](https://github.com/termux/termux-app/releases) 下载（不要用 Google Play 版本）。
+从 [Google Play](https://play.google.com/store/apps/details?id=com.termux)、[F-Droid](https://f-droid.org/packages/com.termux/) 或 [GitHub Releases](https://github.com/termux/termux-app/releases) 下载均可。
+
+> **注意**：如需使用 Termux-API 功能（GPS、相机、短信等），还必须从 F-Droid 安装 [Termux:API App](https://f-droid.org/packages/com.termux.api/)——该 App 在 Google Play 上没有。
 
 ### 2. 安装依赖
 
@@ -111,9 +113,11 @@ tail -f ~/server.log
 通过 `execute_local_command` 调用 40+ Termux-API 命令：
 
 ```bash
-# 安装 Termux-API（需要同时安装 App 和包）
+# 在 Termux 内安装 termux-api 包
 pkg install termux-api -y
 ```
+
+> **必须**：还需从 F-Droid 安装 [Termux:API App](https://f-droid.org/packages/com.termux.api/)，仅安装上面的包是不够的。
 
 常用命令：
 - `termux-location` - GPS 定位
