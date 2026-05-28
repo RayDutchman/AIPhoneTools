@@ -570,8 +570,12 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-    # 2. Auto-load memory.md (if exists)
-    if os.path.exists(GLOBAL_MEMORY_PATH):
+     # 2. Auto-load memory.md (only for new conversations, i.e. first message)
+    # For ongoing conversations (history > 1), memory was already injected in the
+    # first request and is present in the conversation history - skip to avoid
+    # redundant token usage and context bloat.
+    is_new_conversation = len(incoming) <= 1
+    if is_new_conversation and os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
                 memory_content = f.read(2000)  # Limit to 2000 chars
@@ -589,6 +593,8 @@ def chat_completions():
             log.warning("[MEMORY] memory.md is not valid UTF-8 text, skipping")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
+    elif not is_new_conversation:
+        log.info(f"[MEMORY] Skipped (ongoing conversation, history={len(incoming)} messages)")
     
     # 3. Merge system message from Chatbox (if any)
     if chatbox_system_msgs:
