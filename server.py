@@ -1010,10 +1010,7 @@ def chat_completions():
         yield _make_sse_chunk(finish_reason="stop", resp_id=resp_id, created=resp_created, model_id=model_id)
         yield b"data: [DONE]\n\n"
 
-    resp = Response(_generate(), content_type='text/event-stream; charset=utf-8')
-    resp.headers['X-Accel-Buffering'] = 'no'
-    resp.headers['Cache-Control'] = 'no-cache'
-    return resp
+    return Response(_generate(), content_type='text/event-stream; charset=utf-8')
 
 
 @app.route('/v1/models', methods=['GET'])
