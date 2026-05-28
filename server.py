@@ -811,14 +811,18 @@ def chat_completions():
                 # Extract a readable summary of the arguments
                 try:
                     args_dict = json.loads(raw_args) if raw_args.strip() else {}
-                    # Show first value if single-arg tool, empty dict = no args
-                    values = list(args_dict.values())
-                    if len(values) == 1:
-                        arg_display = str(values[0]).strip()
-                    elif len(values) > 1:
-                        arg_display = json.dumps(args_dict, ensure_ascii=False)
+                    # write_phone_file: show filename only, hide content
+                    if name == "write_phone_file":
+                        arg_display = args_dict.get("filename", "").strip()
                     else:
-                        arg_display = ""
+                        # Show first value if single-arg tool, empty dict = no args
+                        values = list(args_dict.values())
+                        if len(values) == 1:
+                            arg_display = str(values[0]).strip()
+                        elif len(values) > 1:
+                            arg_display = json.dumps(args_dict, ensure_ascii=False)
+                        else:
+                            arg_display = ""
                 except Exception:
                     arg_display = raw_args.strip()
                 if arg_display:
