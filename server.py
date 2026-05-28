@@ -811,11 +811,16 @@ def chat_completions():
                 # Extract a readable summary of the arguments
                 try:
                     args_dict = json.loads(raw_args) if raw_args.strip() else {}
-                    # Show first value if single-arg tool, otherwise show full JSON
+                    # Show first value if single-arg tool, empty dict = no args
                     values = list(args_dict.values())
-                    arg_display = values[0] if len(values) == 1 else json.dumps(args_dict, ensure_ascii=False)
+                    if len(values) == 1:
+                        arg_display = str(values[0]).strip()
+                    elif len(values) > 1:
+                        arg_display = json.dumps(args_dict, ensure_ascii=False)
+                    else:
+                        arg_display = ""
                 except Exception:
-                    arg_display = raw_args
+                    arg_display = raw_args.strip()
                 if arg_display:
                     lang = "bash" if name == "execute_local_command" else ""
                     display_parts.append(f"  - `{name}`\n```{lang}\n{arg_display}\n```")
