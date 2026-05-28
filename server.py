@@ -803,18 +803,23 @@ def chat_completions():
                 "tool_calls": tool_calls
             })
 
-            # Push tool calling hint to Chatbox (separate message bubble, list all tool names in call order)
-            tool_names = [tc.get('function', {}).get('name', 'unknown') for tc in tool_calls]
-            # Merge consecutive same names: cmd, cmd, cmd, list -> cmd ×3, list; each tool on separate line
+            # Push tool calling hint to Chatbox (separate message bubble, show each call with args)
             display_parts = []
-            i = 0
-            while i < len(tool_names):
-                name = tool_names[i]
-                count = 1
-                while i + count < len(tool_names) and tool_names[i + count] == name:
-                    count += 1
-                display_parts.append(f"  - `{name}`" + (f" ×{count}" if count > 1 else ""))
-                i += count
+            for tc in tool_calls:
+                name = tc.get('function', {}).get('name', 'unknown')
+                raw_args = tc.get('function', {}).get('arguments', '')
+                # Extract a readable summary of the arguments
+                try:
+                    args_dict = json.loads(raw_args) if raw_args.strip() else {}
+                    # Show first value if single-arg tool, otherwise show full JSON
+                    values = list(args_dict.values())
+                    arg_display = values[0] if len(values) == 1 else json.dumps(args_dict, ensure_ascii=False)
+                except Exception:
+                    arg_display = raw_args
+                if arg_display:
+                    display_parts.append(f"  - `{name}`\n    ```\n    {arg_display}\n    ```")
+                else:
+                    display_parts.append(f"  - `{name}`")
             tool_display = "\n".join(display_parts)
 
             tool_resp_id = f"chatcmpl-tool-{tool_round}-{int(time.time())}"
