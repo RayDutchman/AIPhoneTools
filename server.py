@@ -693,7 +693,7 @@ def chat_completions():
                                 # Avoid Chatbox receiving empty message.
                                 if not content_parts:
                                     yield _make_sse_chunk(
-                                        content=" ", resp_id=resp_id,
+                                        content="\u200b", resp_id=resp_id,
                                         created=resp_created, model_id=model_id
                                     )
                                 yield _make_sse_chunk(
