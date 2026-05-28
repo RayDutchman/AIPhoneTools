@@ -744,7 +744,7 @@ def chat_completions():
         MAX_TOOL_ROUNDS = 20  # Prevent infinite loop
         # Force interrupt tool calling when approaching Chatbox total timeout, let AI generate summary directly
         # Chatbox default total timeout ~60-90s; leave 15s margin for final summary generation
-        BUDGET_SECONDS = 50
+        BUDGET_SECONDS = 120
         tool_round = 0
         budget_exceeded = False  # Flag whether interrupted by time budget
 
