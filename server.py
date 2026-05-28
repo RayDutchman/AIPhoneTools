@@ -851,18 +851,20 @@ def chat_completions():
                 daemon=True
             )
             tool_exec_thread.start()
-            elapsed_ticks = 0
+            heartbeat_count = 0
             while tool_exec_thread.is_alive():
                 tool_exec_thread.join(timeout=5)
                 if tool_exec_thread.is_alive():
-                    elapsed_ticks += 1
-                    elapsed_sec = elapsed_ticks * 5
+                    heartbeat_count += 1
+                    log.info(f"[HEARTBEAT] Sending progress message #{heartbeat_count} while waiting for tools")
                     # Send a complete standalone message so Chatbox resets its timeout counter
-                    hb_id = f"chatcmpl-hb-{tool_round}-{elapsed_ticks}-{int(time.time())}"
+                    hb_id = f"chatcmpl-hb-{tool_round}-{heartbeat_count}-{int(time.time())}"
                     hb_created = int(time.time())
-                    yield _make_sse_chunk(content=f"⏳ {elapsed_sec}s", resp_id=hb_id, created=hb_created, role="assistant", model_id=model_id)
+                    dots = "." * heartbeat_count
+                    yield _make_sse_chunk(content=dots, resp_id=hb_id, created=hb_created, role="assistant", model_id=model_id)
                     yield _make_sse_chunk(finish_reason="stop", resp_id=hb_id, created=hb_created, model_id=model_id)
                     yield b"data: [DONE]\n\n"
+            log.info(f"[HEARTBEAT] Tool done after {heartbeat_count} heartbeats")
             tool_results = tool_results_container[0]
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
