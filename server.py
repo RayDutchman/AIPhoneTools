@@ -577,9 +577,18 @@ def chat_completions():
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
                 memory_content = f.read(2000)  # Limit to 2000 chars
+            # Sanity check: skip if content looks like binary/corrupted data
+            # (printable chars should make up >80% of valid markdown)
             if memory_content.strip():
-                system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
-                log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
+                printable = sum(1 for c in memory_content if c.isprintable() or c in "\n\r\t")
+                ratio = printable / len(memory_content)
+                if ratio < 0.8:
+                    log.warning(f"[MEMORY] memory.md looks like binary data (printable ratio={ratio:.2f}), skipping")
+                else:
+                    system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
+                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
+        except UnicodeDecodeError:
+            log.warning("[MEMORY] memory.md is not valid UTF-8 text, skipping")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
     
