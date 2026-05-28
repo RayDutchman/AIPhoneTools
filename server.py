@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import logging
+import threading
 import subprocess
 import requests
 from flask import Flask, request, jsonify, Response
@@ -496,6 +497,30 @@ def execute_all_tool_calls(tool_calls):
     return results
 
 
+def execute_all_tool_calls_with_heartbeat(tool_calls, heartbeat_fn, interval=5):
+    """
+    Execute tool calls in a background thread, yielding heartbeat SSE chunks
+    every `interval` seconds to prevent Chatbox SSE idle timeout (~15-30s).
+
+    Returns (heartbeat_chunks_generator, results_getter) where results_getter()
+    blocks until done and returns the tool results list.
+    """
+    done_event = threading.Event()
+    results_box = [None]
+
+    def _run():
+        results_box[0] = execute_all_tool_calls(tool_calls)
+        done_event.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    # Yield heartbeats until done
+    while not done_event.wait(timeout=interval):
+        yield heartbeat_fn()
+
+    return results_box[0]
+
+
 # ==== 6. SSE Helper Functions ====
 
 def _make_sse_chunk(content=None, finish_reason=None, resp_id="", role=None, created=None, model_id=None):
@@ -812,8 +837,19 @@ def chat_completions():
                 role="assistant", model_id=model_id
             )
 
-            # Execute all tools
-            tool_results = execute_all_tool_calls(tool_calls)
+            # Execute tools in background thread, send heartbeat every 5s
+            # to prevent Chatbox SSE idle timeout (~15-30s with no data)
+            def _heartbeat():
+                return _make_sse_chunk(
+                    content=" ", resp_id=tool_resp_id,
+                    created=tool_created, model_id=model_id
+                )
+            gen = execute_all_tool_calls_with_heartbeat(tool_calls, _heartbeat)
+            try:
+                while True:
+                    yield next(gen)
+            except StopIteration as e:
+                tool_results = e.value
             messages.extend(tool_results)
             log.info(f"[TOOL] Execution done, result lengths: {[len(r['content']) for r in tool_results]}")
 
