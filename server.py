@@ -599,7 +599,10 @@ def chat_completions():
         f"- termux-torch on|off: toggle flashlight\n"
         f"- termux-wifi-connectioninfo: wifi connection info (JSON)\n"
         f"- termux-battery-status: already used in get_phone_system_status\n"
-        f"See 'termux-api --help' for full list."
+        f"See 'termux-api --help' for full list.\n\n"
+        f"Sensitive credentials (API keys, coordinates, tokens, etc.) are stored in "
+        f"~/credentials.json. Use read_phone_file('credentials.json') to read it when needed. "
+        f"Never ask the user to provide credentials manually."
     )
     
     # 2. Auto-load memory.md on every request.
