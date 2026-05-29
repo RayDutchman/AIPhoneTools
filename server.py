@@ -600,9 +600,10 @@ def chat_completions():
         f"- termux-wifi-connectioninfo: wifi connection info (JSON)\n"
         f"- termux-battery-status: already used in get_phone_system_status\n"
         f"See 'termux-api --help' for full list.\n\n"
-        f"Sensitive credentials (API keys, coordinates, tokens, etc.) are stored in "
-        f"~/credentials.json. Use read_phone_file('credentials.json') to read it when needed. "
-        f"Never ask the user to provide credentials manually."
+        f"Sensitive credentials are stored in ~/credentials.json (not in memory). "
+        f"Use read_phone_file('credentials.json') to read it when needed. Never ask the user to provide credentials manually.\n"
+        f"File structure: {{\"credentials\": [{{\"name\", \"note\", \"url\", \"port\", \"username\", \"password\", \"api_key\", \"token\", \"cert_path\"}}], "
+        f"\"locations\": {{\"home\": {{\"lat\", \"lng\", \"address\"}}, \"work\": {{...}}}}}}"
     )
     
     # 2. Auto-load memory.md on every request.
