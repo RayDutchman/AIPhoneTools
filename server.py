@@ -602,36 +602,9 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-    # 2. Auto-load memory.md: inject on round 1, then every 5 user turns thereafter.
-    # To work correctly even when Chatbox truncates history, we embed an invisible
-    # marker "\u200b[mem]\u200b" in every assistant reply when memory is injected.
-    # On each request, we scan incoming for this marker and count user messages since
-    # the last marker; if >= 5 (or no marker found), we inject again.
-    MEMORY_MARKER_TAG = "\u200b[mem]\u200b"  # Zero-width space wrapped tag, invisible in Chatbox UI
-    MEMORY_INJECT_EVERY = 5
-
-    # Find the last assistant message containing the marker
-    last_marker_user_count = 0  # how many user msgs were in history up to and including marker position
-    user_idx = 0  # running count of user messages seen
-    for msg in incoming:
-        if msg.get("role") == "user":
-            user_idx += 1
-        elif msg.get("role") == "assistant":
-            content_val = msg.get("content") or ""
-            if isinstance(content_val, list):
-                content_val = " ".join(p.get("text", "") for p in content_val if isinstance(p, dict))
-            if MEMORY_MARKER_TAG in content_val:
-                last_marker_user_count = user_idx  # snapshot user count at this marker
-
-    current_user_count = user_idx  # total user messages in incoming
-    if last_marker_user_count == 0:
-        # No marker found → first injection
-        should_inject_memory = True
-    else:
-        should_inject_memory = (current_user_count - last_marker_user_count) >= MEMORY_INJECT_EVERY
-
-    memory_injected = False
-    if should_inject_memory and os.path.exists(GLOBAL_MEMORY_PATH):
+    # 2. Auto-load memory.md on every request.
+    # Simple and reliable: always inject so AI always has latest memory context.
+    if os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
                 memory_content = f.read(8000)  # Limit to 8000 chars
@@ -644,14 +617,11 @@ def chat_completions():
                     log.warning(f"[MEMORY] memory.md looks like binary data (printable ratio={ratio:.2f}), skipping")
                 else:
                     system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
-                    memory_injected = True
-                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars (user_turns_since_marker={current_user_count - last_marker_user_count})")
+                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
         except UnicodeDecodeError:
             log.warning("[MEMORY] memory.md is not valid UTF-8 text, skipping")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
-    else:
-        log.info(f"[MEMORY] Skipped (user_turns_since_marker={current_user_count - last_marker_user_count})")
     
     # 3. Merge system message from Chatbox (if any)
     if chatbox_system_msgs:
@@ -708,15 +678,6 @@ def chat_completions():
     # ---- Streaming mode: receive and forward immediately, respond to Chatbox instantly ----
     def _generate():
         request_start_time = time.time()  # Start time of entire request
-
-        # If memory was injected this round, emit an invisible marker chunk first.
-        # Chatbox stores it in assistant history; we scan for it on future requests
-        # to know exactly when the last injection happened, regardless of truncation.
-        if memory_injected:
-            marker_id = f"chatcmpl-mem-{int(time.time())}"
-            yield _make_sse_chunk(content=MEMORY_MARKER_TAG, resp_id=marker_id,
-                                  role="assistant", model_id=model_id)
-
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
