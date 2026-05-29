@@ -170,8 +170,16 @@ def execute_local_command(command=None, **kwargs):
         result = subprocess.run(
             command, shell=True, text=True, capture_output=True, timeout=300
         )
-        output = f"[Exit Code]: {result.returncode}\n[Stdout]:\n{result.stdout}\n[Stderr]:\n{result.stderr}"
-        output = _clean_output(output)
+        stdout = _clean_output(result.stdout)
+        stderr = _clean_output(result.stderr)
+        parts = []
+        if result.returncode != 0:
+            parts.append(f"[Exit Code]: {result.returncode}")
+        if stdout.strip():
+            parts.append(f"[Stdout]:\n{stdout}")
+        if stderr.strip():
+            parts.append(f"[Stderr]:\n{stderr}")
+        output = "\n".join(parts) if parts else "(no output)"
         output = _smart_truncate(output, TOOL_OUTPUT_MAX_CHARS)
         return output
     except subprocess.TimeoutExpired:
