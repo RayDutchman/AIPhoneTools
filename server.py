@@ -602,12 +602,12 @@ def chat_completions():
         f"See 'termux-api --help' for full list."
     )
     
-    # 2. Auto-load memory.md (only for new conversations, i.e. first message)
-    # For ongoing conversations (history > 1), memory was already injected in the
-    # first request and is present in the conversation history - skip to avoid
-    # redundant token usage and context bloat.
-    is_new_conversation = len(incoming) <= 1
-    if is_new_conversation and os.path.exists(GLOBAL_MEMORY_PATH):
+    # 2. Auto-load memory.md: inject on round 1, then every 5 rounds thereafter.
+    # incoming length: round 1 = 1, round 2 = 3, round N = 2N-1
+    # So inject when len(incoming) == 1, or (len(incoming) - 1) % 10 == 0
+    msg_count = len(incoming)
+    should_inject_memory = (msg_count == 1) or (msg_count > 1 and (msg_count - 1) % 10 == 0)
+    if should_inject_memory and os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
                 memory_content = f.read(8000)  # Limit to 8000 chars
@@ -619,14 +619,15 @@ def chat_completions():
                 if ratio < 0.8:
                     log.warning(f"[MEMORY] memory.md looks like binary data (printable ratio={ratio:.2f}), skipping")
                 else:
+                    round_num = (msg_count + 1) // 2
                     system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
-                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md")
+                    log.info(f"[MEMORY] Loaded {len(memory_content)} chars from memory.md (round {round_num})")
         except UnicodeDecodeError:
             log.warning("[MEMORY] memory.md is not valid UTF-8 text, skipping")
         except Exception as e:
             log.warning(f"[MEMORY] Failed to load memory.md: {e}")
-    elif not is_new_conversation:
-        log.info(f"[MEMORY] Skipped (ongoing conversation, history={len(incoming)} messages)")
+    else:
+        log.info(f"[MEMORY] Skipped (history={msg_count} messages)")
     
     # 3. Merge system message from Chatbox (if any)
     if chatbox_system_msgs:
