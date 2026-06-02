@@ -7,6 +7,7 @@ import shutil
 import logging
 import subprocess
 import threading
+import queue
 import requests
 from flask import Flask, request, jsonify, Response
 
@@ -27,6 +28,122 @@ DOWNLOAD_DIR = os.path.expanduser("~")
 TOOL_OUTPUT_MAX_CHARS = 8000
 # Global memory file (shared across all sessions)
 GLOBAL_MEMORY_PATH = os.path.join(DOWNLOAD_DIR, "memory.md")
+
+# ==== TTS Configuration ====
+_TTS_STATE_PATH = os.path.join(DOWNLOAD_DIR, "tts_state.json")
+
+def _load_tts_state():
+    try:
+        with open(_TTS_STATE_PATH, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        return bool(s.get("enabled", False)), float(s.get("rate", 1.0))
+    except Exception:
+        return False, 1.0
+
+def _save_tts_state(enabled, rate):
+    try:
+        with open(_TTS_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"enabled": enabled, "rate": rate}, f)
+    except Exception:
+        pass
+
+TTS_ENABLED, TTS_RATE = _load_tts_state()
+
+# TTS sentence queue and worker thread
+_tts_queue = queue.Queue()
+_tts_current_proc = None  # currently running termux-tts-speak process
+_tts_proc_lock = threading.Lock()
+
+def _tts_worker():
+    global _tts_current_proc
+    while True:
+        text = _tts_queue.get()
+        if text is None:
+            _tts_queue.task_done()
+            continue
+        if TTS_ENABLED and text.strip():
+            try:
+                proc = subprocess.Popen(
+                    ["termux-tts-speak", "-r", str(TTS_RATE), text]
+                )
+                with _tts_proc_lock:
+                    _tts_current_proc = proc
+                proc.wait(timeout=120)
+            except Exception as e:
+                log.warning(f"[TTS] speak error: {e}")
+            finally:
+                with _tts_proc_lock:
+                    _tts_current_proc = None
+        _tts_queue.task_done()
+
+_tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+_tts_thread.start()
+
+def _tts_stop_current():
+    """Kill current TTS process and drain the queue."""
+    with _tts_proc_lock:
+        proc = _tts_current_proc
+    if proc and proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    # Drain pending items
+    while not _tts_queue.empty():
+        try:
+            _tts_queue.get_nowait()
+            _tts_queue.task_done()
+        except Exception:
+            break
+
+def _strip_markdown(text):
+    """Strip markdown formatting, leaving plain speakable text."""
+    # Remove code blocks (``` ... ```)
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove inline code
+    text = re.sub(r"`[^`]*`", "", text)
+    # Remove headings (#, ##, etc.)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # Remove bold/italic (**text**, *text*, __text__, _text_)
+    text = re.sub(r"(\*{1,2}|_{1,2})(.+?)\1", r"\2", text)
+    # Remove links [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    # Remove images ![alt](url)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    # Remove horizontal rules
+    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Remove bullet/numbered list markers
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+# Per-request TTS buffer for sentence segmentation
+_TTS_SENTENCE_ENDINGS = re.compile("[。！？\n]+")
+def _tts_feed(buf_holder, new_text, flush=False):
+    """Feed new_text into sentence buffer; enqueue complete sentences.
+    buf_holder is a list of one string (mutable buffer).
+    If flush=True, enqueue whatever remains.
+    """
+    if not TTS_ENABLED:
+        return
+    buf_holder[0] += new_text
+    while True:
+        m = _TTS_SENTENCE_ENDINGS.search(buf_holder[0])
+        if not m:
+            break
+        sentence = buf_holder[0][:m.end()]
+        buf_holder[0] = buf_holder[0][m.end():]
+        clean = _strip_markdown(sentence)
+        if clean.strip():
+            _tts_queue.put(clean)
+    if flush and buf_holder[0].strip():
+        clean = _strip_markdown(buf_holder[0])
+        if clean.strip():
+            _tts_queue.put(clean)
+        buf_holder[0] = ""
+
 
 # ==== 1b. Multi-model config loading ====
 # Load models_config.json on startup; fall back to an empty template if missing.
@@ -290,6 +407,22 @@ def update_global_memory(content, mode="append"):
         return f"Error: Failed to update global memory. Reason: {str(e)}"
 
 
+def tts_set_config(enabled=None, rate=None):
+    """Enable/disable TTS and/or set speech rate. Agent-callable."""
+    global TTS_ENABLED, TTS_RATE
+    changed = []
+    if enabled is not None:
+        TTS_ENABLED = bool(enabled)
+        changed.append(f"enabled={TTS_ENABLED}")
+    if rate is not None:
+        TTS_RATE = float(rate)
+        changed.append(f"rate={TTS_RATE}")
+    _save_tts_state(TTS_ENABLED, TTS_RATE)
+    if changed:
+        return f"TTS config updated: {', '.join(changed)}"
+    return f"TTS current state: enabled={TTS_ENABLED}, rate={TTS_RATE}"
+
+
 tools_map = {
     "read_phone_file": read_phone_file,
     "write_phone_file": write_phone_file,
@@ -298,6 +431,7 @@ tools_map = {
     "search_phone_files": search_phone_files,
     "get_phone_system_status": get_phone_system_status,
     "update_global_memory": update_global_memory,
+    "tts_set_config": tts_set_config,
 }
 
 tools_schema = [
@@ -401,6 +535,27 @@ tools_schema = [
                     }
                 },
                 "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tts_set_config",
+            "description": "Enable or disable text-to-speech for AI replies, and/or set speech rate. Call with enabled=true/false to toggle, rate=1.0 to set speed (0.5=half, 2.0=double).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to true to enable TTS, false to disable"
+                    },
+                    "rate": {
+                        "type": "number",
+                        "description": "Speech rate: 1.0=normal, 0.5=half speed, 2.0=double speed"
+                    }
+                },
+                "required": []
             }
         }
     }
@@ -603,7 +758,7 @@ def chat_completions():
         f"- termux-location: get GPS location (JSON)\n"
         f"- termux-clipboard-get/set: read/write clipboard\n"
         f"- termux-notification: send notification to status bar\n"
-        f"- termux-tts-speak <text>: text to speech\n"
+        f"- termux-tts-speak [-e engine] [-l language] [-n region] [-v variant] [-p pitch] [-r rate] [-s stream] <text>: text-to-speech. Default stream: NOTIFICATION. Streams: ALARM, MUSIC, NOTIFICATION, RING, SYSTEM, VOICE_CALL. -p pitch (1.0=normal), -r rate (1.0=normal, 0.5=half, 2.0=double).\n"
         f"- termux-camera-photo -c <0|1> <file>: take photo (0=back, 1=front)\n"
         f"- termux-sms-list: list SMS messages (requires permission)\n"
         f"- termux-toast <text>: show toast message\n"
@@ -693,6 +848,9 @@ def chat_completions():
     # ---- Streaming mode: receive and forward immediately, respond to Chatbox instantly ----
     def _generate():
         request_start_time = time.time()  # Start time of entire request
+        # Stop any previous TTS and clear queue for new conversation
+        _tts_stop_current()
+        tts_buf = [""]  # mutable sentence buffer for TTS segmentation
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -759,6 +917,7 @@ def chat_completions():
                         # Only forward plain text content
                         if delta.get("content") and not has_tool_calls:
                             content_parts.append(delta["content"])
+                            _tts_feed(tts_buf, delta["content"])
                             yield (line + "\n\n").encode("utf-8")
 
                     except Exception:
@@ -771,6 +930,7 @@ def chat_completions():
             first_resp.close()
 
         content = "".join(content_parts)
+        _tts_feed(tts_buf, "", flush=True)
         tool_calls = [tc_map[i] for i in sorted(tc_map)] if tc_map else None
 
         if not tool_calls:
@@ -984,6 +1144,7 @@ def chat_completions():
                             # Text content: forward in real-time (only when tool_calls not yet triggered)
                             if delta.get("content") and not next_has_tool_calls:
                                 next_content_parts.append(delta["content"])
+                                _tts_feed(tts_buf, delta["content"])
                                 yield _make_sse_chunk(
                                     content=delta["content"],
                                     resp_id=next_resp_id,
@@ -1001,6 +1162,7 @@ def chat_completions():
                 next_resp.close()
 
             content = "".join(next_content_parts)
+            _tts_feed(tts_buf, "", flush=True)
             tool_calls = [next_tc_map[i] for i in sorted(next_tc_map)] if next_tc_map else None
             resp_id = next_resp_id or resp_id
             resp_created = next_created
@@ -1043,6 +1205,7 @@ def chat_completions():
                                 delta = d.get("choices", [{}])[0].get("delta", {})
                                 text = delta.get("content")
                                 if text:
+                                    _tts_feed(tts_buf, text)
                                     yield _make_sse_chunk(
                                         content=text,
                                         resp_id=summary_resp_id, created=summary_created,
@@ -1058,6 +1221,7 @@ def chat_completions():
                                           model_id=model_id)
                 finally:
                     summary_resp.close()
+                _tts_feed(tts_buf, "", flush=True)
                 resp_id = summary_resp_id
                 resp_created = summary_created
 
