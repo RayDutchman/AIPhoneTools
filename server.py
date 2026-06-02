@@ -123,12 +123,42 @@ def _strip_markdown(text):
 _TTS_SENTENCE_ENDINGS = re.compile("[。！？\n]+")
 def _tts_feed(buf_holder, new_text, flush=False):
     """Feed new_text into sentence buffer; enqueue complete sentences.
-    buf_holder is a list of one string (mutable buffer).
+    buf_holder is a list: [text_buffer, in_code_block].
+    Tracks code block state across streaming chunks to skip them entirely.
     If flush=True, enqueue whatever remains.
     """
     if not TTS_ENABLED:
         return
     buf_holder[0] += new_text
+    # Process code block boundaries first (``` may span multiple chunks)
+    while "```" in buf_holder[0]:
+        idx = buf_holder[0].index("```")
+        if not buf_holder[1]:  # not in code block
+            # Enqueue text before the opening fence (may contain sentences)
+            before = buf_holder[0][:idx]
+            buf_holder[0] = buf_holder[0][idx + 3:]
+            buf_holder[1] = True  # enter code block
+            # Feed the text before the fence through sentence splitter
+            _flush_sentences(buf_holder, before)
+        else:  # inside code block, skip until closing fence
+            buf_holder[0] = buf_holder[0][idx + 3:]
+            buf_holder[1] = False  # exit code block
+    # If inside code block, hold everything (wait for closing fence)
+    if buf_holder[1]:
+        return
+    # Normal sentence splitting
+    _flush_sentences(buf_holder, None)
+    if flush and buf_holder[0].strip():
+        clean = _strip_markdown(buf_holder[0])
+        if clean.strip():
+            _tts_queue.put(clean)
+        buf_holder[0] = ""
+
+
+def _flush_sentences(buf_holder, prepend_text):
+    """Split buf_holder[0] (optionally prepended with prepend_text) by sentence endings and enqueue."""
+    if prepend_text is not None:
+        buf_holder[0] = prepend_text + buf_holder[0]
     while True:
         m = _TTS_SENTENCE_ENDINGS.search(buf_holder[0])
         if not m:
@@ -138,11 +168,6 @@ def _tts_feed(buf_holder, new_text, flush=False):
         clean = _strip_markdown(sentence)
         if clean.strip():
             _tts_queue.put(clean)
-    if flush and buf_holder[0].strip():
-        clean = _strip_markdown(buf_holder[0])
-        if clean.strip():
-            _tts_queue.put(clean)
-        buf_holder[0] = ""
 
 
 # ==== 1b. Multi-model config loading ====
@@ -850,7 +875,7 @@ def chat_completions():
         request_start_time = time.time()  # Start time of entire request
         # Stop any previous TTS and clear queue for new conversation
         _tts_stop_current()
-        tts_buf = [""]  # mutable sentence buffer for TTS segmentation
+        tts_buf = ["", False]  # [text_buffer, in_code_block]
         try:
             first_resp = call_llm_stream(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
