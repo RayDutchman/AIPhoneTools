@@ -130,13 +130,30 @@ def _tts_feed(buf_holder, new_text, flush=False):
     if not TTS_ENABLED:
         return
     buf_holder[0] += new_text
+    # If previous chunk ended mid-lang-tag, drop everything up to first newline
+    if len(buf_holder) > 2 and buf_holder[2] == "drop_next_line":
+        nl = buf_holder[0].find("\n")
+        if nl != -1:
+            buf_holder[0] = buf_holder[0][nl + 1:]
+            buf_holder.pop(2)
+        else:
+            buf_holder[0] = ""  # still waiting for newline
+            return
     # Process code block boundaries first (``` may span multiple chunks)
     while "```" in buf_holder[0]:
         idx = buf_holder[0].index("```")
         if not buf_holder[1]:  # not in code block
             # Enqueue text before the opening fence (may contain sentences)
             before = buf_holder[0][:idx]
-            buf_holder[0] = buf_holder[0][idx + 3:]
+            rest = buf_holder[0][idx + 3:]
+            # Skip language identifier (everything up to first newline after ```)
+            nl = rest.find("\n")
+            if nl != -1:
+                buf_holder[0] = rest[nl + 1:]
+            else:
+                # Lang tag not yet complete; mark a sentinel to drop next line
+                buf_holder[0] = ""
+                buf_holder.append("drop_next_line")
             buf_holder[1] = True  # enter code block
             # Feed the text before the fence through sentence splitter
             _flush_sentences(buf_holder, before)
