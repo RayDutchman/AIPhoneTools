@@ -432,6 +432,35 @@ def update_global_memory(content, mode="append"):
         return f"Error: Failed to update global memory. Reason: {str(e)}"
 
 
+def _infer_lang(tool_name, arg_display):
+    """Infer markdown code block language tag from tool name and first command token."""
+    if tool_name != "execute_local_command":
+        return ""
+    cmd = arg_display.strip().lstrip("$ ")
+    first = cmd.split()[0].lower() if cmd.split() else ""
+    _LANG_MAP = [
+        (["python3", "python", "python2"],       "python"),
+        (["node", "nodejs", "npx", "ts-node"],   "javascript"),
+        (["ruby", "irb"],                        "ruby"),
+        (["perl"],                               "perl"),
+        (["php"],                                "php"),
+        (["lua"],                                "lua"),
+        (["rscript", "r"],                       "r"),
+        (["java"],                               "java"),
+        (["kotlinc", "kotlin"],                  "kotlin"),
+        (["gcc", "cc", "clang"],                 "c"),
+        (["g++", "clang++"],                     "cpp"),
+        (["go"],                                 "go"),
+        (["cargo", "rustc"],                     "rust"),
+        (["swift", "swiftc"],                    "swift"),
+        (["bash", "sh", "zsh", "fish", "dash"],  "bash"),
+    ]
+    for prefixes, lang in _LANG_MAP:
+        if first in prefixes:
+            return lang
+    return "bash"
+
+
 def tts_set_config(enabled=None, rate=None):
     """Enable/disable TTS and/or set speech rate. Agent-callable."""
     global TTS_ENABLED, TTS_RATE
@@ -1053,7 +1082,7 @@ def chat_completions():
                 except Exception:
                     arg_display = raw_args.strip()
                 if arg_display:
-                    lang = "bash" if name == "execute_local_command" else ""
+                    lang = _infer_lang(name, arg_display)
                     display_parts.append(f"  - `{name}`\n```{lang}\n{arg_display}\n```")
                 else:
                     display_parts.append(f"  - `{name}`")
