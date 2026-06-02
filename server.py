@@ -98,10 +98,10 @@ def _tts_stop_current():
 
 def _strip_markdown(text):
     """Strip markdown formatting, leaving plain speakable text."""
-    # Remove code blocks (``` ... ```)
+    # Remove code blocks (``` ... ```) - skip entirely
     text = re.sub(r"```[\s\S]*?```", "", text)
-    # Remove inline code
-    text = re.sub(r"`[^`]*`", "", text)
+    # Remove inline code backticks but keep the text
+    text = re.sub(r"`([^`]*)`", r"\1", text)
     # Remove headings (#, ##, etc.)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
     # Remove bold/italic (**text**, *text*, __text__, _text_)
