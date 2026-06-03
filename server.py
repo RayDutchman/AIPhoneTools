@@ -818,11 +818,18 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
 
 # ==== 5. Tool Execution ====
 
+# Termux:API 是单进程 Android App，并发 IPC 调用会产生资源竞争。
+# 用信号量限制同时只有 1 个 termux-api 命令在执行，其余命令不受影响。
+_termux_api_semaphore = threading.Semaphore(1)
+
+
 def execute_all_tool_calls(tool_calls):
     """Execute all tool_calls in parallel and return a list of tool result messages.
     Results are returned in the same order as tool_calls.
     Each tool runs in its own thread; long-running tools (e.g. GPS, TTS) do not block others.
-    Individual tool timeout is handled inside execute_local_command (subprocess timeout=300s).
+    termux-* commands share a semaphore (max concurrency=1) to avoid competing for
+    the Termux:API App's single-process IPC resource.
+    Individual tool timeout is handled inside execute_local_command (subprocess timeout).
     """
     def _run_one(tool_call):
         func_info = tool_call.get("function", {})
@@ -853,7 +860,15 @@ def execute_all_tool_calls(tool_calls):
             result = "Error: empty tool name"
         elif func_name in tools_map:
             try:
-                result = tools_map[func_name](**func_args)
+                # termux-api 命令串行执行，避免并发竞争 Termux:API App
+                cmd = func_args.get("command", "").strip().lstrip("$ ")
+                is_termux_api = (func_name == "execute_local_command"
+                                 and cmd.startswith("termux-"))
+                if is_termux_api:
+                    with _termux_api_semaphore:
+                        result = tools_map[func_name](**func_args)
+                else:
+                    result = tools_map[func_name](**func_args)
             except TypeError as e:
                 result = f"Error: argument mismatch ({str(e)}), received: {func_args}"
             except Exception as e:
