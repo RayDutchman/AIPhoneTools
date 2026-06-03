@@ -125,11 +125,11 @@ def _strip_markdown(text):
     text = re.sub(r"`([^`]*)`", r"\1", text)
     # Remove headings (#, ##, etc.)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    # Remove bold/italic: **text**, *text*, __text__, _text_（re.DOTALL 支持跨行）
+    # Remove bold/italic: 先处理双标记再处理单标记，避免 ** 被单 * 正则错误匹配
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"\*(.+?)\*",     r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"__(.+?)__",     r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"_(.+?)_",       r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"\1", text, flags=re.DOTALL)
     # Remove strikethrough ~~text~~
     text = re.sub(r"~~(.+?)~~",     r"\1", text, flags=re.DOTALL)
     # Remove links [text](url) -> text
@@ -141,9 +141,10 @@ def _strip_markdown(text):
     # Remove bullet/numbered list markers
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
-    # 兜底：清除句子分割后残留的孤立标记符（如 ** _ ` ## 单独出现）
-    # 只删紧邻空白或位于字符串边界的标记符，避免误删正文中的合法字符
-    text = re.sub(r"(?<!\w)[*_`#~]+(?!\w)", "", text)
+    # 兜底：清除所有残留的不成对 markdown 标记符
+    # 删除前后没有同时夹在「非空白」字符之间的 * _ ` # ~
+    # 即：只要标记符有一侧是空白/边界，就删除（保护 2*3、*ptr 这类正文用法）
+    text = re.sub(r"(?<!\S)[*_`#~]+|[*_`#~]+(?!\S)", "", text)
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
