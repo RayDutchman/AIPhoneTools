@@ -776,9 +776,15 @@ def _patch_messages_for_provider(messages: list, provider: dict) -> list:
         if msg.get("role") == "assistant" and "tool_calls" in msg:
             for tc in msg["tool_calls"]:
                 if tc.get("type") == "function" and "function" in tc:
-                    # Inject a dummy thought_signature to bypass Google's strict validation
-                    if "thought_signature" not in tc["function"]:
-                        tc["function"]["thought_signature"] = ""
+                    # Inject a dummy thought_signature to bypass Google's strict validation.
+                    # According to Google docs, when missing, we must use specific magic strings or put it in extra_content.
+                    # We'll inject it into extra_content for OpenAI compatibility.
+                    if "extra_content" not in tc:
+                        tc["extra_content"] = {}
+                    if "google" not in tc["extra_content"]:
+                        tc["extra_content"]["google"] = {}
+                    if "thought_signature" not in tc["extra_content"]["google"]:
+                        tc["extra_content"]["google"]["thought_signature"] = "skip_thought_signature_validator"
     return new_messages
 
 
