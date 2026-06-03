@@ -8,6 +8,7 @@ import logging
 import subprocess
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, request, jsonify, Response
 
@@ -713,10 +714,15 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
 
 # ==== 5. Tool Execution ====
 
+_TOOL_ROUND_TIMEOUT_SECS = 60  # 单轮所有工具并行执行的整体超时（秒）
+
 def execute_all_tool_calls(tool_calls):
-    """Execute all tool_calls and return a list of tool result messages."""
-    results = []
-    for tool_call in tool_calls:
+    """Execute all tool_calls in parallel and return a list of tool result messages.
+    Results are returned in the same order as tool_calls.
+    Overall timeout: _TOOL_ROUND_TIMEOUT_SECS seconds — timed-out tools return an error
+    placeholder instead of blocking the whole round.
+    """
+    def _run_one(tool_call):
         func_info = tool_call.get("function", {})
         func_name = func_info.get("name", "")
         tool_call_id = tool_call.get("id", "unknown")
@@ -757,12 +763,46 @@ def execute_all_tool_calls(tool_calls):
         if len(result_str) > TOOL_OUTPUT_MAX_CHARS:
             result_str = result_str[:TOOL_OUTPUT_MAX_CHARS] + "\n...[truncated]"
 
-        results.append({
+        return {
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": func_name,
             "content": result_str,
-        })
+        }
+
+    results = [None] * len(tool_calls)
+    with ThreadPoolExecutor(max_workers=len(tool_calls)) as executor:
+        future_to_idx = {
+            executor.submit(_run_one, tc): i
+            for i, tc in enumerate(tool_calls)
+        }
+        try:
+            for future in as_completed(future_to_idx, timeout=_TOOL_ROUND_TIMEOUT_SECS):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    tc = tool_calls[idx]
+                    results[idx] = {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "unknown"),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "content": f"Error: tool execution failed: {str(e)}",
+                    }
+        except TimeoutError:
+            pass  # 整体超时，下面补齐未完成的工具
+        # 超时未完成的工具填充占位错误
+        for future, idx in future_to_idx.items():
+            if results[idx] is None:
+                tc = tool_calls[idx]
+                name = tc.get("function", {}).get("name", "")
+                log.warning(f"[TOOL] '{name}' timed out after {_TOOL_ROUND_TIMEOUT_SECS}s")
+                results[idx] = {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", "unknown"),
+                    "name": name,
+                    "content": f"Error: tool '{name}' timed out after {_TOOL_ROUND_TIMEOUT_SECS}s",
+                }
     return results
 
 
