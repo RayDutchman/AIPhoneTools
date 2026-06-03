@@ -135,7 +135,7 @@ def _strip_markdown(text):
     特殊层（TTS 专属，与标准渲染行为不同）：
       - fenced 代码块（``` ... ```）：整块删除，不念内容
       - inline 代码（`code`）：删除，不念内容
-      - 图片（![alt](url)）：整个删除，alt 也不念
+      - 图片（![alt](url)）：保留 alt 文字朗读，丢弃 URL
         （在进入 buf 前已提前处理，此处作为兜底）
     """
     # ── 特殊层：代码和图片 ──────────────────────────────────────────
@@ -143,8 +143,8 @@ def _strip_markdown(text):
     text = re.sub(r"```[\s\S]*?```", "", text)
     # inline 代码：删除（包含内容）
     text = re.sub(r"`[^`]*`", "", text)
-    # 图片：删除整个语法，alt 也不念（兜底，_tts_feed 入队前已处理）
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    # 图片：保留 alt 文字朗读，丢弃 URL（兜底，_tts_feed 入队前已处理）
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
 
     # ── 标准层：还原渲染后可见文字 ───────────────────────────────────
     # 标题：去掉 # 符号
@@ -195,8 +195,9 @@ def _tts_feed(buf_holder, new_text, flush=False):
     """
     if not TTS_ENABLED:
         return
-    # 在加入 buf 前先去掉图片语法 ![alt](url)，避免 ! 被句子分割器当作句末标点
-    new_text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", new_text)
+    # 在加入 buf 前先处理图片语法 ![alt](url)，保留 alt 文字，丢弃 URL
+    # 避免 ! 被句子分割器当作句末标点提前切断
+    new_text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", new_text)
     buf_holder[0] += new_text
     # If previous chunk ended mid-lang-tag, drop everything up to first newline
     if len(buf_holder) > 2 and buf_holder[2] == "drop_next_line":
