@@ -202,7 +202,9 @@ def _strip_markdown(text):
     return text.strip()
 
 # Per-request TTS buffer for sentence segmentation
-_TTS_SENTENCE_ENDINGS = re.compile("[。！？\n]+")
+# 匹配句末标点及换行，并顺带“吃掉”紧跟其后的闭合引号、括号等符号，
+# 避免闭合符号被单独切分为下一句从而被 TTS 引擎当做字面朗读（如“双引号”）。
+_TTS_SENTENCE_ENDINGS = re.compile(r"[。！？\n]+[\"\'”’\)）\]］}｝】》』」]*")
 def _tts_feed(buf_holder, new_text, flush=False):
     """Feed new_text into sentence buffer; enqueue complete sentences.
     buf_holder is a list: [text_buffer, in_code_block].
