@@ -328,6 +328,12 @@ def cmd_remove():
     save_config(cfg)
 
 
+def _build_endpoint(api_base: str, path: str) -> str:
+    base = api_base.rstrip("/")
+    if base.endswith("/v1") or base.endswith("/openai"):
+        return f"{base}/{path}"
+    return f"{base}/v1/{path}"
+
 def cmd_test():
     """Test API connection for specified Provider + model."""
     cfg = load_config()
@@ -359,7 +365,7 @@ def cmd_test():
         return
     model = models[midx]
 
-    api_url = f"{provider['api_base']}/v1/chat/completions"
+    api_url = _build_endpoint(provider['api_base'], "chat/completions")
     headers = {
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json"

@@ -743,6 +743,12 @@ tools_schema = [
 def make_headers(api_key: str) -> dict:
     return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
+def _build_endpoint(api_base: str, path: str) -> str:
+    """Build endpoint URL based on api_base string."""
+    base = api_base.rstrip("/")
+    if base.endswith("/v1") or base.endswith("/openai"):
+        return f"{base}/{path}"
+    return f"{base}/v1/{path}"
 
 def safe_get_choice(data):
     """Safely get choices[0].message, return dict or empty dict."""
@@ -760,7 +766,7 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
     model_id = model_id or get_default_model_id()
     provider, model = get_provider_for_model(model_id)
 
-    api_url = f"{provider['api_base']}/v1/chat/completions"
+    api_url = _build_endpoint(provider['api_base'], "chat/completions")
     payload = {"model": model_id, "messages": messages, "stream": False}
     # Only include tools field when model declares tool support
     if tools and model.get("supports_tools", True):
@@ -794,7 +800,7 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
     model_id = model_id or get_default_model_id()
     provider, model = get_provider_for_model(model_id)
 
-    api_url = f"{provider['api_base']}/v1/chat/completions"
+    api_url = _build_endpoint(provider['api_base'], "chat/completions")
     payload = {"model": model_id, "messages": messages, "stream": True}
     if tools and model.get("supports_tools", True):
         payload["tools"] = tools
@@ -1509,7 +1515,7 @@ if __name__ == '__main__':
         Each dict has at least {"id": str, "name": str, "supports_tools": True}.
         Returns an empty list on failure.
         """
-        url = f"{api_base.rstrip('/')}/v1/models"
+        url = _build_endpoint(api_base, "models")
         try:
             resp = requests.get(
                 url,
