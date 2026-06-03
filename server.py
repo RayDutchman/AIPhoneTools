@@ -758,6 +758,30 @@ def safe_get_choice(data):
     return choices[0].get("message") or {}
 
 
+def _patch_messages_for_provider(messages: list, provider: dict) -> list:
+    """
+    Apply provider-specific fixes to the messages array before sending.
+    For example, Google Gemini's OpenAI wrapper crashes with 400 if 'thought_signature'
+    is missing from assistant's past tool_calls (which frontends often strip).
+    """
+    api_base = provider.get("api_base", "").lower()
+    is_gemini = "generativelanguage.googleapis" in api_base or "gemini" in api_base
+    
+    if not is_gemini:
+        return messages
+
+    import copy
+    new_messages = copy.deepcopy(messages)
+    for msg in new_messages:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg["tool_calls"]:
+                if tc.get("type") == "function" and "function" in tc:
+                    # Inject a dummy thought_signature to bypass Google's strict validation
+                    if "thought_signature" not in tc["function"]:
+                        tc["function"]["thought_signature"] = ""
+    return new_messages
+
+
 def call_llm_sync(messages, tools=None, model_id: str = None):
     """
     Non-streaming request, return parsed dict.
@@ -767,7 +791,9 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
     provider, model = get_provider_for_model(model_id)
 
     api_url = _build_endpoint(provider['api_base'], "chat/completions")
-    payload = {"model": model_id, "messages": messages, "stream": False}
+    
+    patched_messages = _patch_messages_for_provider(messages, provider)
+    payload = {"model": model_id, "messages": patched_messages, "stream": False}
     # Only include tools field when model declares tool support
     if tools and model.get("supports_tools", True):
         payload["tools"] = tools
@@ -787,8 +813,11 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
     except requests.exceptions.Timeout:
         raise RuntimeError("Upstream LLM request timed out")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"Upstream LLM error: {e.response.status_code} {e.response.text[:200]}")
+        err_msg = f"Upstream LLM error: {e.response.status_code} {e.response.text}"
+        log.error(err_msg)
+        raise RuntimeError(err_msg)
     except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        log.error(f"Request/parse failed: {str(e)}")
         raise RuntimeError(f"Request/parse failed: {str(e)}")
 
 
@@ -801,7 +830,9 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
     provider, model = get_provider_for_model(model_id)
 
     api_url = _build_endpoint(provider['api_base'], "chat/completions")
-    payload = {"model": model_id, "messages": messages, "stream": True}
+    
+    patched_messages = _patch_messages_for_provider(messages, provider)
+    payload = {"model": model_id, "messages": patched_messages, "stream": True}
     if tools and model.get("supports_tools", True):
         payload["tools"] = tools
 
@@ -817,8 +848,11 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
     except requests.exceptions.Timeout:
         raise RuntimeError("Upstream LLM request timed out")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"Upstream LLM error: {e.response.status_code} {e.response.text[:200]}")
+        err_msg = f"Upstream LLM error: {e.response.status_code} {e.response.text}"
+        log.error(err_msg)
+        raise RuntimeError(err_msg)
     except requests.exceptions.RequestException as e:
+        log.error(f"Network request failed: {str(e)}")
         raise RuntimeError(f"Network request failed: {str(e)}")
 
 
