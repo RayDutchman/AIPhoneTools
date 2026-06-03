@@ -56,7 +56,10 @@ def _save_tts_state(enabled, rate):
         log.error(f"[TTS] Failed to save state to {TTS_STATE_PATH}: {e}")
 
 TTS_ENABLED, TTS_RATE = _load_tts_state()
-log.info(f"[TTS] Loaded state: enabled={TTS_ENABLED}, rate={TTS_RATE}")
+
+# Termux:API 是单进程 Android App，并发 IPC 调用会产生资源竞争（如挂起或崩溃）。
+# 用全局信号量限制同时只有 1 个 termux-api 命令在执行。
+_termux_api_semaphore = threading.Semaphore(1)
 
 # TTS sentence queue and worker thread
 _tts_queue = queue.Queue()
@@ -73,12 +76,15 @@ def _tts_worker():
         if TTS_ENABLED and text.strip():
             proc = None
             try:
-                proc = subprocess.Popen(
-                    ["termux-tts-speak", "-r", str(TTS_RATE), text]
-                )
-                with _tts_proc_lock:
-                    _tts_current_proc = proc
-                proc.wait(timeout=TTS_SPEAK_TIMEOUT_SECS)
+                # 必须用 _termux_api_semaphore 保护 TTS，因为它底层也是 IPC 调用，
+                # 不能和 execute_local_command 中的 termux-* 命令并发
+                with _termux_api_semaphore:
+                    proc = subprocess.Popen(
+                        ["termux-tts-speak", "-r", str(TTS_RATE), text]
+                    )
+                    with _tts_proc_lock:
+                        _tts_current_proc = proc
+                    proc.wait(timeout=TTS_SPEAK_TIMEOUT_SECS)
             except subprocess.TimeoutExpired:
                 # 朗读超时：主动 kill，防止僵尸进程占用音频通道
                 log.warning(f"[TTS] speak timeout, killing process")
@@ -864,9 +870,6 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
 
 # ==== 5. Tool Execution ====
 
-# Termux:API 是单进程 Android App，并发 IPC 调用会产生资源竞争。
-# 用信号量限制同时只有 1 个 termux-api 命令在执行，其余命令不受影响。
-_termux_api_semaphore = threading.Semaphore(1)
 
 
 def execute_all_tool_calls(tool_calls):
@@ -906,9 +909,6 @@ def execute_all_tool_calls(tool_calls):
             result = "Error: empty tool name"
         elif func_name in tools_map:
             try:
-                # termux-api 命令串行执行，避免并发竞争 Termux:API App。
-                # 用正则在命令字符串里搜索 termux-xxx 子命令，
-                # 兼容 "timeout 30 termux-xxx"、"start=...; termux-xxx" 等写法。
                 cmd = func_args.get("command", "")
                 is_termux_api = (func_name == "execute_local_command"
                                  and bool(re.search(r'\btermux-\w', cmd)))
