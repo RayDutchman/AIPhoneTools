@@ -51,10 +51,12 @@ def _save_tts_state(enabled, rate):
     try:
         with open(_TTS_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump({"enabled": enabled, "rate": rate}, f)
-    except Exception:
-        pass
+        log.info(f"[TTS] State saved: enabled={enabled}, rate={rate} -> {_TTS_STATE_PATH}")
+    except Exception as e:
+        log.error(f"[TTS] Failed to save state to {_TTS_STATE_PATH}: {e}")
 
 TTS_ENABLED, TTS_RATE = _load_tts_state()
+log.info(f"[TTS] Loaded state: enabled={TTS_ENABLED}, rate={TTS_RATE}")
 
 # TTS sentence queue and worker thread
 _tts_queue = queue.Queue()
