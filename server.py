@@ -359,9 +359,13 @@ def execute_local_command(command=None, **kwargs):
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
     if not command:
         return "Error: No command provided"
-    # termux-api 命令（以 termux- 开头）用短超时，IPC 调用要么快速响应要么永久挂起
+    # termux-api 命令（以 termux- 开头）用短超时，IPC 调用要么快速响应要么永久挂起。
+    # 用 Linux timeout 命令包装而非 subprocess timeout，确保整个进程树被 kill，
+    # 避免 shell=True 时 subprocess.timeout 只杀 shell 不杀孙进程的问题。
     cmd_stripped = command.strip().lstrip("$ ")
-    timeout = TERMUX_API_TIMEOUT_SECS if cmd_stripped.startswith("termux-") else COMMAND_TIMEOUT_SECS
+    if cmd_stripped.startswith("termux-"):
+        command = f"timeout {TERMUX_API_TIMEOUT_SECS} {command}"
+    timeout = COMMAND_TIMEOUT_SECS
     try:
         result = subprocess.run(
             command, shell=True, text=True, capture_output=True,
@@ -371,6 +375,9 @@ def execute_local_command(command=None, **kwargs):
         stderr = _clean_output(result.stderr)
         parts = []
         if result.returncode != 0:
+            # timeout 命令超时时 exit code 为 124
+            if result.returncode == 124:
+                return f"Error: Command execution timeout ({TERMUX_API_TIMEOUT_SECS}s)"
             parts.append(f"[Exit Code]: {result.returncode}")
         if stdout.strip():
             parts.append(f"[Stdout]:\n{stdout}")
