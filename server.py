@@ -125,6 +125,16 @@ def _strip_markdown(text):
     text = re.sub(r"`([^`]*)`", r"\1", text)
     # Remove headings (#, ##, etc.)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # Remove blockquote markers, keep content
+    text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
+    # Remove table separator rows (|---|---| 纯分隔行，无可读内容)
+    text = re.sub(r"^\|[\s\-:|]+\|\s*$", "", text, flags=re.MULTILINE)
+    # Extract table content rows (| 内容 | 内容 |) → 内容  内容
+    text = re.sub(
+        r"^\|(.+)\|$",
+        lambda m: "  ".join(c.strip() for c in m.group(1).split("|") if c.strip()),
+        text, flags=re.MULTILINE
+    )
     # Remove bold/italic: 先处理双标记再处理单标记，避免 ** 被单 * 正则错误匹配
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text, flags=re.DOTALL)
@@ -143,7 +153,6 @@ def _strip_markdown(text):
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
     # 兜底：清除所有残留的不成对 markdown 标记符
     # 删除前后没有同时夹在「非空白」字符之间的 * _ ` # ~
-    # 即：只要标记符有一侧是空白/边界，就删除（保护 2*3、*ptr 这类正文用法）
     text = re.sub(r"(?<!\S)[*_`#~]+|[*_`#~]+(?!\S)", "", text)
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
