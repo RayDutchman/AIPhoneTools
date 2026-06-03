@@ -168,6 +168,8 @@ def _tts_feed(buf_holder, new_text, flush=False):
     """
     if not TTS_ENABLED:
         return
+    # 在加入 buf 前先去掉图片语法 ![alt](url)，避免 ! 被句子分割器当作句末标点
+    new_text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", new_text)
     buf_holder[0] += new_text
     # If previous chunk ended mid-lang-tag, drop everything up to first newline
     if len(buf_holder) > 2 and buf_holder[2] == "drop_next_line":
