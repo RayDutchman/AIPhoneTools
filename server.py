@@ -714,7 +714,9 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
 
 # ==== 5. Tool Execution ====
 
-_TOOL_ROUND_TIMEOUT_SECS = 60  # 单轮所有工具并行执行的整体超时（秒）
+_TOOL_ROUND_TIMEOUT_SECS = 310  # 单轮并行工具整体超时（秒）
+                                # 比 COMMAND_TIMEOUT_SECS(300) 多 10s，让 subprocess 先超时，
+                                # ThreadPoolExecutor 只作最后兜底，防止真正卡死的进程
 
 def execute_all_tool_calls(tool_calls):
     """Execute all tool_calls in parallel and return a list of tool result messages.
