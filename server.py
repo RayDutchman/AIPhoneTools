@@ -3,6 +3,7 @@ import re
 import glob
 import json
 import time
+import shlex
 import shutil
 import logging
 import subprocess
@@ -423,12 +424,11 @@ def execute_local_command(command=None, **kwargs):
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
     if not command:
         return "Error: No command provided"
-    # termux-api 命令（以 termux- 开头）用短超时，IPC 调用要么快速响应要么永久挂起。
-    # 用 Linux timeout 命令包装而非 subprocess timeout，确保整个进程树被 kill，
-    # 避免 shell=True 时 subprocess.timeout 只杀 shell 不杀孙进程的问题。
-    cmd_stripped = command.strip().lstrip("$ ")
-    if cmd_stripped.startswith("termux-"):
-        command = f"timeout {TERMUX_API_TIMEOUT_SECS} {command}"
+    # 包含 termux-api 命令时，用 Linux timeout 包装整个命令，确保进程树被 kill。
+    # 用正则搜索命令字符串，兼容 "start=...; termux-xxx"、"timeout N termux-xxx" 等写法。
+    # 跳过已经有 timeout 包装的命令，避免双重包装。
+    if re.search(r'\btermux-\w', command) and not command.strip().startswith("timeout "):
+        command = f"timeout {TERMUX_API_TIMEOUT_SECS}s bash -c {shlex.quote(command)}"
     timeout = COMMAND_TIMEOUT_SECS
     try:
         result = subprocess.run(
@@ -860,10 +860,12 @@ def execute_all_tool_calls(tool_calls):
             result = "Error: empty tool name"
         elif func_name in tools_map:
             try:
-                # termux-api 命令串行执行，避免并发竞争 Termux:API App
-                cmd = func_args.get("command", "").strip().lstrip("$ ")
+                # termux-api 命令串行执行，避免并发竞争 Termux:API App。
+                # 用正则在命令字符串里搜索 termux-xxx 子命令，
+                # 兼容 "timeout 30 termux-xxx"、"start=...; termux-xxx" 等写法。
+                cmd = func_args.get("command", "")
                 is_termux_api = (func_name == "execute_local_command"
-                                 and cmd.startswith("termux-"))
+                                 and bool(re.search(r'\btermux-\w', cmd)))
                 if is_termux_api:
                     with _termux_api_semaphore:
                         result = tools_map[func_name](**func_args)
