@@ -105,21 +105,16 @@ _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
 
 def _tts_stop_current():
-    """Kill current TTS process and drain the queue."""
-    with _tts_proc_lock:
-        proc = _tts_current_proc
-    if proc and proc.poll() is None:
-        try:
-            proc.kill()
-            proc.wait()  # 回收，防止僵尸进程继续占用音频通道
-        except Exception:
-            pass
-    # Drain pending items
+    """Drain the queue without killing current sentence to prevent Termux TTS engine hang."""
+    # 故意不去 kill _tts_current_proc。
+    # 因为强杀 termux-tts-speak (SIGTERM/SIGKILL) 会导致 Android 底层的 TextToSpeech 服务状态损坏，
+    # 从而导致后续所有的 TTS 调用全部变成无声（必须重启 Termux:API 才能恢复）。
+    # 采用优雅取消的策略：当前正在读的这最后一句让它读完，剩余的队列内容全部清空。
     while not _tts_queue.empty():
         try:
             _tts_queue.get_nowait()
             _tts_queue.task_done()
-        except Exception:
+        except queue.Empty:
             break
 
 def _strip_markdown(text):
