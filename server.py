@@ -149,8 +149,9 @@ def _strip_markdown(text):
     # ── 标准层：还原渲染后可见文字 ───────────────────────────────────
     # 标题：去掉 # 符号
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    # 引用块：去掉行首 > 符号
-    text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
+    # 引用块：循环去掉所有层级的 > 符号（嵌套引用可能有多层）
+    while re.search(r"^>\s?", text, flags=re.MULTILINE):
+        text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
     # 表格分隔行（纯 |---|---| 行）：整行删除
     text = re.sub(r"^\|[\s\-:|]+\|\s*$", "", text, flags=re.MULTILINE)
     # 表格内容行：提取单元格文字，空格拼接
@@ -159,6 +160,8 @@ def _strip_markdown(text):
         lambda m: "  ".join(c.strip() for c in m.group(1).split("|") if c.strip()),
         text, flags=re.MULTILINE
     )
+    # 粗斜体（先处理三标记，避免被双/单标记正则拆散）
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text, flags=re.DOTALL)
     # 粗体：** 和 __（先处理双标记，避免单标记正则误匹配）
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"__(.+?)__",     r"\1", text, flags=re.DOTALL)
@@ -167,8 +170,15 @@ def _strip_markdown(text):
     text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)",       r"\1", text, flags=re.DOTALL)
     # 删除线
     text = re.sub(r"~~(.+?)~~", r"\1", text, flags=re.DOTALL)
-    # 链接：保留文字，丢弃 URL
+    # 链接：保留文字，丢弃 URL（含可选标题 "title"）
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    # 脚注引用 [^1] 和脚注定义行 [^1]: ...：整个删除
+    text = re.sub(r"^\[\^[^\]]+\]:.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\[\^[^\]]+\]", "", text)
+    # 任务列表复选框：- [x] / - [ ] 中的 [x] [ ] 部分
+    text = re.sub(r"\[[ xX]\]\s*", "", text)
+    # 定义列表 ": 定义内容"：去掉行首冒号
+    text = re.sub(r"^:\s+", "", text, flags=re.MULTILINE)
     # 水平线
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
     # 有序/无序列表标记
@@ -176,6 +186,10 @@ def _strip_markdown(text):
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
     # HTML 注释
     text = re.sub(r"<!--[\s\S]*?-->", "", text)
+    # HTML 标签：去掉标签，保留标签内文字
+    text = re.sub(r"<[^>]+>", "", text)
+    # 转义字符：去掉反斜杠，保留被转义的字符
+    text = re.sub(r"\\([\\`*_{}\[\]()#+\-.!])", r"\1", text)
 
     # ── 兜底：清除因句子分割产生的残留标记符 ────────────────────────
     # 标记符两侧至少有一侧是空白/边界时删除（保护 2*3、email@domain 等正文用法）
