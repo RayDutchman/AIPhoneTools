@@ -11,6 +11,19 @@ import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, request, jsonify, Response
+from config import (
+    DOWNLOAD_DIR, GLOBAL_MEMORY_PATH, TTS_STATE_PATH, MODELS_CONFIG_PATH,
+    TOOL_OUTPUT_MAX_CHARS, SMART_TRUNCATE_TAIL_RATIO,
+    FILE_READ_MAX_BYTES,
+    COMMAND_TIMEOUT_SECS,
+    MAX_TOOL_ROUNDS, BUDGET_SECONDS, KEEPALIVE_INTERVAL_SECS,
+    LLM_SYNC_TIMEOUT_SECS, LLM_STREAM_CONNECT_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
+    FETCH_MODELS_TIMEOUT_SECS,
+    TTS_SPEAK_TIMEOUT_SECS,
+    MEMORY_READ_MAX_CHARS, MEMORY_PRINTABLE_RATIO,
+    DEFAULT_MODEL_FALLBACK, SYNTHETIC_MODEL_MAX_TOKENS,
+    SERVER_HOST, SERVER_PORT, STARTUP_AUTO_CONFIRM_SECS,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,15 +36,8 @@ app = Flask(__name__)
 
 # ==== 1. Basic Configuration ====
 
-DOWNLOAD_DIR = os.path.expanduser("~")
-
-# Max chars for tool output, truncate if exceeded
-TOOL_OUTPUT_MAX_CHARS = 8000
-# Global memory file (shared across all sessions)
-GLOBAL_MEMORY_PATH = os.path.join(DOWNLOAD_DIR, "memory.md")
-
 # ==== TTS Configuration ====
-_TTS_STATE_PATH = os.path.join(DOWNLOAD_DIR, "tts_state.json")
+_TTS_STATE_PATH = TTS_STATE_PATH
 
 def _load_tts_state():
     try:
@@ -69,7 +75,7 @@ def _tts_worker():
                 )
                 with _tts_proc_lock:
                     _tts_current_proc = proc
-                proc.wait(timeout=120)
+                proc.wait(timeout=TTS_SPEAK_TIMEOUT_SECS)
             except Exception as e:
                 log.warning(f"[TTS] speak error: {e}")
             finally:
@@ -191,7 +197,7 @@ def _flush_sentences(buf_holder, prepend_text):
 # ==== 1b. Multi-model config loading ====
 # Load models_config.json on startup; fall back to an empty template if missing.
 
-_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "models_config.json")
+_CONFIG_PATH = MODELS_CONFIG_PATH
 
 # Empty template — no hardcoded provider or key.
 # If models_config.json is missing, the startup prompt will force the user
@@ -254,7 +260,7 @@ def get_provider_for_model(model_id: str):
 
     # model_id not in our fetched list — build a synthetic model entry
     # so the upstream receives exactly the model_id the client requested.
-    synthetic_model = {"id": model_id, "supports_tools": True, "max_tokens": 8192}
+    synthetic_model = {"id": model_id, "supports_tools": True, "max_tokens": SYNTHETIC_MODEL_MAX_TOKENS}
 
     providers = MODELS_CONFIG.get("providers", {})
     if len(providers) == 1:
@@ -273,7 +279,7 @@ def get_provider_for_model(model_id: str):
 
 
 def get_default_model_id() -> str:
-    return MODELS_CONFIG.get("default_model", "claude-sonnet-4-6")
+    return MODELS_CONFIG.get("default_model", DEFAULT_MODEL_FALLBACK)
 
 
 # ==== 2. Tool Functions ====
@@ -282,7 +288,7 @@ def read_phone_file(filename):
     path = os.path.join(DOWNLOAD_DIR, filename)
     try:
         size = os.path.getsize(path)
-        if size > 500 * 1024:
+        if size > FILE_READ_MAX_BYTES:
             return f"Error: File {filename} too large ({size // 1024}KB), please specify a smaller file"
         # Try UTF-8 first, fallback to latin-1 (guaranteed not to throw)
         for enc in ("utf-8", "gbk", "latin-1"):
@@ -326,9 +332,9 @@ def _smart_truncate(text, max_chars):
     if len(text) <= max_chars:
         return text
     error_keywords = ("error", "traceback", "exception", "failed", "errno", "fatal", "killed")
-    tail = text[-int(max_chars * 0.3):]
+    tail = text[-int(max_chars * SMART_TRUNCATE_TAIL_RATIO):]
     if any(k in tail.lower() for k in error_keywords):
-        head = text[:int(max_chars * 0.7)]
+        head = text[:int(max_chars * (1 - SMART_TRUNCATE_TAIL_RATIO))]
         return head + "\n...[truncated]...\n" + tail
     return text[:max_chars] + "\n...[truncated]"
 
@@ -340,7 +346,8 @@ def execute_local_command(command=None, **kwargs):
         return "Error: No command provided"
     try:
         result = subprocess.run(
-            command, shell=True, text=True, capture_output=True, timeout=300
+            command, shell=True, text=True, capture_output=True,
+            timeout=COMMAND_TIMEOUT_SECS
         )
         stdout = _clean_output(result.stdout)
         stderr = _clean_output(result.stderr)
@@ -355,7 +362,7 @@ def execute_local_command(command=None, **kwargs):
         output = _smart_truncate(output, TOOL_OUTPUT_MAX_CHARS)
         return output
     except subprocess.TimeoutExpired:
-        return "Error: Command execution timeout (300s)"
+        return f"Error: Command execution timeout ({COMMAND_TIMEOUT_SECS}s)"
     except Exception as e:
         return f"Error: Command execution failed. Reason: {str(e)}"
 
@@ -668,7 +675,7 @@ def call_llm_sync(messages, tools=None, model_id: str = None):
         resp = requests.post(
             api_url, json=payload,
             headers=make_headers(provider["api_key"]),
-            timeout=120
+            timeout=LLM_SYNC_TIMEOUT_SECS
         )
         resp.raise_for_status()
         result = json.loads(resp.content.decode("utf-8"))
@@ -700,7 +707,7 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
         resp = requests.post(
             api_url, json=payload,
             headers=make_headers(provider["api_key"]),
-            stream=True, timeout=(30, 300)
+            stream=True, timeout=(LLM_STREAM_CONNECT_TIMEOUT, LLM_STREAM_READ_TIMEOUT)
         )
         resp.raise_for_status()
         return resp
@@ -871,13 +878,13 @@ def chat_completions():
     if os.path.exists(GLOBAL_MEMORY_PATH):
         try:
             with open(GLOBAL_MEMORY_PATH, "r", encoding="utf-8") as f:
-                memory_content = f.read(8000)  # Limit to 8000 chars
+                memory_content = f.read(MEMORY_READ_MAX_CHARS)
             # Sanity check: skip if content looks like binary/corrupted data
             # (printable chars should make up >80% of valid markdown)
             if memory_content.strip():
                 printable = sum(1 for c in memory_content if c.isprintable() or c in "\n\r\t")
                 ratio = printable / len(memory_content)
-                if ratio < 0.8:
+                if ratio < MEMORY_PRINTABLE_RATIO:
                     log.warning(f"[MEMORY] memory.md looks like binary data (printable ratio={ratio:.2f}), skipping")
                 else:
                     system_parts.append(f"\n\n--- Long-term Memory (from ~/memory.md) ---\n{memory_content}")
@@ -908,7 +915,6 @@ def chat_completions():
 
     # ---- Non-streaming mode: multi-round tool calling loop ----
     if not want_stream:
-        MAX_TOOL_ROUNDS = 50
         try:
             current_data = call_llm_sync(messages, tools=tools_schema, model_id=model_id)
         except RuntimeError as e:
@@ -1037,10 +1043,7 @@ def chat_completions():
         # ---- Multi-round tool calling loop ----
         # Each round: execute tools → send tool name hint → request next round → forward text in real-time
         # Loop until AI stops calling tools.
-        MAX_TOOL_ROUNDS = 50  # Prevent infinite loop
-        # Force interrupt tool calling when approaching Chatbox total timeout, let AI generate summary directly
-        # Chatbox default total timeout ~60-90s; leave 15s margin for final summary generation
-        BUDGET_SECONDS = 1200  # 20 minutes
+        # Prevent infinite loop; force budget interrupt before Chatbox total timeout
         tool_round = 0
         budget_exceeded = False  # Flag whether interrupted by time budget
 
@@ -1146,7 +1149,7 @@ def chat_completions():
             )
             tool_exec_thread.start()
             while tool_exec_thread.is_alive():
-                tool_exec_thread.join(timeout=5)
+                tool_exec_thread.join(timeout=KEEPALIVE_INTERVAL_SECS)
                 if tool_exec_thread.is_alive():
                     # Send standard SSE comment heartbeat (no visible content in Chatbox)
                     yield b": keepalive\n\n"
@@ -1397,7 +1400,7 @@ if __name__ == '__main__':
             resp = requests.get(
                 url,
                 headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15
+                timeout=FETCH_MODELS_TIMEOUT_SECS
             )
             resp.raise_for_status()
             data = resp.json()
@@ -1409,7 +1412,7 @@ if __name__ == '__main__':
                         "id": mid,
                         "name": mid,
                         "supports_tools": True,
-                        "max_tokens": 8192
+                        "max_tokens": SYNTHETIC_MODEL_MAX_TOKENS
                     })
             return models
         except Exception as e:
@@ -1555,7 +1558,7 @@ if __name__ == '__main__':
             answered = False
             user_input = ""
             try:
-                ready, _, _ = select.select([sys.stdin], [], [], 10)
+                ready, _, _ = select.select([sys.stdin], [], [], STARTUP_AUTO_CONFIRM_SECS)
                 if ready:
                     user_input = sys.stdin.readline().strip().lower()
                     answered = True
@@ -1616,4 +1619,4 @@ if __name__ == '__main__':
     MODELS_CONFIG = _startup_prompt()
 
     # Start Flask server
-    app.run(host='127.0.0.1', port=5846, debug=False, threaded=True)
+    app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False, threaded=True)
