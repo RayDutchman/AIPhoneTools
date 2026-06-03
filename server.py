@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, Response
 from config import (
     DOWNLOAD_DIR, GLOBAL_MEMORY_PATH, TTS_STATE_PATH, MODELS_CONFIG_PATH,
     TOOL_OUTPUT_MAX_CHARS, SMART_TRUNCATE_TAIL_RATIO,
-    FILE_READ_MAX_BYTES,
+    FILE_READ_MAX_BYTES, FILE_WRITE_MAX_BYTES,
     COMMAND_TIMEOUT_SECS,
     MAX_TOOL_ROUNDS, BUDGET_SECONDS, KEEPALIVE_INTERVAL_SECS,
     LLM_SYNC_TIMEOUT_SECS, LLM_STREAM_CONNECT_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
@@ -37,11 +37,10 @@ app = Flask(__name__)
 # ==== 1. Basic Configuration ====
 
 # ==== TTS Configuration ====
-_TTS_STATE_PATH = TTS_STATE_PATH
 
 def _load_tts_state():
     try:
-        with open(_TTS_STATE_PATH, "r", encoding="utf-8") as f:
+        with open(TTS_STATE_PATH, "r", encoding="utf-8") as f:
             s = json.load(f)
         return bool(s.get("enabled", False)), float(s.get("rate", 1.0))
     except Exception:
@@ -49,11 +48,11 @@ def _load_tts_state():
 
 def _save_tts_state(enabled, rate):
     try:
-        with open(_TTS_STATE_PATH, "w", encoding="utf-8") as f:
+        with open(TTS_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump({"enabled": enabled, "rate": rate}, f)
-        log.info(f"[TTS] State saved: enabled={enabled}, rate={rate} -> {_TTS_STATE_PATH}")
+        log.info(f"[TTS] State saved: enabled={enabled}, rate={rate} -> {TTS_STATE_PATH}")
     except Exception as e:
-        log.error(f"[TTS] Failed to save state to {_TTS_STATE_PATH}: {e}")
+        log.error(f"[TTS] Failed to save state to {TTS_STATE_PATH}: {e}")
 
 TTS_ENABLED, TTS_RATE = _load_tts_state()
 log.info(f"[TTS] Loaded state: enabled={TTS_ENABLED}, rate={TTS_RATE}")
@@ -245,7 +244,7 @@ def _load_credentials_example() -> str:
         with open(_CREDENTIALS_EXAMPLE_PATH, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
-        return '{"credentials": [{"name", "note", "url", "port", "username", "password", "api_key", "token", "cert_path"}], "locations": {"home": {"lat", "lng", "address"}, "work": {...}}}'
+        return '{"credentials": [], "locations": {"home": {"lat": 0.0, "lng": 0.0, "address": ""}, "work": {"lat": 0.0, "lng": 0.0, "address": ""}}}'
 
 _CREDENTIALS_EXAMPLE = _load_credentials_example()
 
@@ -319,6 +318,9 @@ def read_phone_file(filename):
 
 def write_phone_file(filename, content):
     path = os.path.join(DOWNLOAD_DIR, filename)
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) > FILE_WRITE_MAX_BYTES:
+        return f"Error: Content too large ({len(content_bytes)} bytes), limit is {FILE_WRITE_MAX_BYTES // 1024}KB"
     try:
         parent = os.path.dirname(path)
         if parent:
@@ -414,11 +416,14 @@ def get_phone_system_status():
         status["storage_free_gb"] = f"{free / (1024**3):.2f} GB"
         status["storage_used_gb"] = f"{used / (1024**3):.2f} GB"
 
-        mem_result = subprocess.run("free -m", shell=True, text=True, capture_output=True)
+        mem_result = subprocess.run(
+            "free -m", shell=True, text=True, capture_output=True, timeout=30
+        )
         status["memory_info_mb"] = mem_result.stdout.strip()
 
         battery_result = subprocess.run(
-            "termux-battery-status", shell=True, text=True, capture_output=True
+            "termux-battery-status", shell=True, text=True, capture_output=True,
+            timeout=30
         )
         if battery_result.returncode == 0 and battery_result.stdout.strip():
             try:
@@ -428,6 +433,9 @@ def get_phone_system_status():
         else:
             status["battery"] = "Termux-API not installed or cannot get battery info"
 
+        return json.dumps(status, ensure_ascii=False, indent=2)
+    except subprocess.TimeoutExpired:
+        status["error"] = "Timeout fetching system status (Termux-API may be unavailable)"
         return json.dumps(status, ensure_ascii=False, indent=2)
     except Exception as e:
         return f"Error: Failed to get system status. Reason: {str(e)}"
@@ -470,29 +478,31 @@ def update_global_memory(content, mode="append"):
         return f"Error: Failed to update global memory. Reason: {str(e)}"
 
 
+_LANG_MAP = [
+    (["python3", "python", "python2"],       "python"),
+    (["node", "nodejs", "npx", "ts-node"],   "javascript"),
+    (["ruby", "irb"],                        "ruby"),
+    (["perl"],                               "perl"),
+    (["php"],                                "php"),
+    (["lua"],                                "lua"),
+    (["rscript", "r"],                       "r"),
+    (["java"],                               "java"),
+    (["kotlinc", "kotlin"],                  "kotlin"),
+    (["gcc", "cc", "clang"],                 "c"),
+    (["g++", "clang++"],                     "cpp"),
+    (["go"],                                 "go"),
+    (["cargo", "rustc"],                     "rust"),
+    (["swift", "swiftc"],                    "swift"),
+    (["bash", "sh", "zsh", "fish", "dash"],  "bash"),
+]
+
+
 def _infer_lang(tool_name, arg_display):
     """Infer markdown code block language tag from tool name and first command token."""
     if tool_name != "execute_local_command":
         return ""
     cmd = arg_display.strip().lstrip("$ ")
     first = cmd.split()[0].lower() if cmd.split() else ""
-    _LANG_MAP = [
-        (["python3", "python", "python2"],       "python"),
-        (["node", "nodejs", "npx", "ts-node"],   "javascript"),
-        (["ruby", "irb"],                        "ruby"),
-        (["perl"],                               "perl"),
-        (["php"],                                "php"),
-        (["lua"],                                "lua"),
-        (["rscript", "r"],                       "r"),
-        (["java"],                               "java"),
-        (["kotlinc", "kotlin"],                  "kotlin"),
-        (["gcc", "cc", "clang"],                 "c"),
-        (["g++", "clang++"],                     "cpp"),
-        (["go"],                                 "go"),
-        (["cargo", "rustc"],                     "rust"),
-        (["swift", "swiftc"],                    "swift"),
-        (["bash", "sh", "zsh", "fish", "dash"],  "bash"),
-    ]
     for prefixes, lang in _LANG_MAP:
         if first in prefixes:
             return lang

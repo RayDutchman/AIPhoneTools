@@ -15,7 +15,8 @@ TOOL_OUTPUT_MAX_CHARS       = 8000   # 工具返回内容超出此字符数时�
 SMART_TRUNCATE_TAIL_RATIO   = 0.3    # _smart_truncate：尾部保留比例
 
 # ==== 文件读写限制 ====
-FILE_READ_MAX_BYTES     = 500 * 1024  # read_phone_file：单文件读取上限（字节）
+FILE_READ_MAX_BYTES     = 500 * 1024   # read_phone_file：单文件读取上限（字节）
+FILE_WRITE_MAX_BYTES    = 1 * 1024 * 1024  # write_phone_file：单次写入上限（字节）
 
 # ==== 命令执行 ====
 COMMAND_TIMEOUT_SECS    = 300   # execute_local_command：shell 命令超时（秒）
