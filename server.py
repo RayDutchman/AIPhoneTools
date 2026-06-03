@@ -116,45 +116,72 @@ def _tts_stop_current():
             break
 
 def _strip_markdown(text):
-    """Strip markdown formatting, leaving plain speakable text.
-    处理完整句子（由 _flush_sentences 保证），不处理 chunk 级别片段。
+    """将 markdown 转换为 TTS 可朗读的纯文本。
+
+    设计原则：
+      标准层 —— 只保留 markdown 渲染后用户可见的文字，去掉所有标记符。
+      特殊层 —— 叠加本项目的 TTS 专属规则（代码不念、图片不念）。
+
+    标准层（对齐 CommonMark 渲染可见内容）：
+      - 标题：去掉 # 符号，保留文字
+      - 粗体/斜体/删除线：去掉标记符，保留内容
+      - 引用块：去掉行首 >，保留内容
+      - 列表：去掉 - / 1. 标记，保留内容
+      - 链接：保留链接文字，丢弃 URL
+      - 表格：分隔行删除，内容行提取单元格文字
+      - 水平线：删除
+      - HTML 注释：删除
+
+    特殊层（TTS 专属，与标准渲染行为不同）：
+      - fenced 代码块（``` ... ```）：整块删除，不念内容
+      - inline 代码（`code`）：删除，不念内容
+      - 图片（![alt](url)）：整个删除，alt 也不念
+        （在进入 buf 前已提前处理，此处作为兜底）
     """
-    # Remove fenced code blocks (``` ... ```) - skip entirely
+    # ── 特殊层：代码和图片 ──────────────────────────────────────────
+    # fenced 代码块：整块删除（包含内容）
     text = re.sub(r"```[\s\S]*?```", "", text)
-    # Remove inline code, keep content
-    text = re.sub(r"`([^`]*)`", r"\1", text)
-    # Remove headings (#, ##, etc.)
+    # inline 代码：删除（包含内容）
+    text = re.sub(r"`[^`]*`", "", text)
+    # 图片：删除整个语法，alt 也不念（兜底，_tts_feed 入队前已处理）
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+
+    # ── 标准层：还原渲染后可见文字 ───────────────────────────────────
+    # 标题：去掉 # 符号
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    # Remove blockquote markers, keep content
+    # 引用块：去掉行首 > 符号
     text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
-    # Remove table separator rows (|---|---| 纯分隔行，无可读内容)
+    # 表格分隔行（纯 |---|---| 行）：整行删除
     text = re.sub(r"^\|[\s\-:|]+\|\s*$", "", text, flags=re.MULTILINE)
-    # Extract table content rows (| 内容 | 内容 |) → 内容  内容
+    # 表格内容行：提取单元格文字，空格拼接
     text = re.sub(
         r"^\|(.+)\|$",
         lambda m: "  ".join(c.strip() for c in m.group(1).split("|") if c.strip()),
         text, flags=re.MULTILINE
     )
-    # Remove bold/italic: 先处理双标记再处理单标记，避免 ** 被单 * 正则错误匹配
+    # 粗体：** 和 __（先处理双标记，避免单标记正则误匹配）
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"__(.+?)__",     r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"\1", text, flags=re.DOTALL)
-    # Remove strikethrough ~~text~~
-    text = re.sub(r"~~(.+?)~~",     r"\1", text, flags=re.DOTALL)
-    # Remove links [text](url) -> text
+    # 斜体：单 * 和 _（负向断言排除 ** 和 __）
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)",       r"\1", text, flags=re.DOTALL)
+    # 删除线
+    text = re.sub(r"~~(.+?)~~", r"\1", text, flags=re.DOTALL)
+    # 链接：保留文字，丢弃 URL
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    # Remove images ![alt](url)
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
-    # Remove horizontal rules
+    # 水平线
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
-    # Remove bullet/numbered list markers
+    # 有序/无序列表标记
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
-    # 兜底：清除所有残留的不成对 markdown 标记符
-    # 删除前后没有同时夹在「非空白」字符之间的 * _ ` # ~
-    text = re.sub(r"(?<!\S)[*_`#~]+|[*_`#~]+(?!\S)", "", text)
-    # Collapse multiple blank lines
+    # HTML 注释
+    text = re.sub(r"<!--[\s\S]*?-->", "", text)
+
+    # ── 兜底：清除因句子分割产生的残留标记符 ────────────────────────
+    # 标记符两侧至少有一侧是空白/边界时删除（保护 2*3、email@domain 等正文用法）
+    text = re.sub(r"(?<!\S)[*_`#~|]+|[*_`#~|]+(?!\S)", "", text)
+
+    # 合并多余空行
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
