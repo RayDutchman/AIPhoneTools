@@ -15,7 +15,7 @@ from config import (
     DOWNLOAD_DIR, GLOBAL_MEMORY_PATH, TTS_STATE_PATH, MODELS_CONFIG_PATH,
     TOOL_OUTPUT_MAX_CHARS, SMART_TRUNCATE_TAIL_RATIO,
     FILE_READ_MAX_BYTES, FILE_WRITE_MAX_BYTES,
-    COMMAND_TIMEOUT_SECS,
+    COMMAND_TIMEOUT_SECS, TERMUX_API_TIMEOUT_SECS,
     MAX_TOOL_ROUNDS, BUDGET_SECONDS, KEEPALIVE_INTERVAL_SECS,
     LLM_SYNC_TIMEOUT_SECS, LLM_STREAM_CONNECT_TIMEOUT, LLM_STREAM_READ_TIMEOUT,
     FETCH_MODELS_TIMEOUT_SECS,
@@ -359,10 +359,13 @@ def execute_local_command(command=None, **kwargs):
         command = kwargs.get("cmd") or kwargs.get("shell_command") or kwargs.get("shell") or ""
     if not command:
         return "Error: No command provided"
+    # termux-api 命令（以 termux- 开头）用短超时，IPC 调用要么快速响应要么永久挂起
+    cmd_stripped = command.strip().lstrip("$ ")
+    timeout = TERMUX_API_TIMEOUT_SECS if cmd_stripped.startswith("termux-") else COMMAND_TIMEOUT_SECS
     try:
         result = subprocess.run(
             command, shell=True, text=True, capture_output=True,
-            timeout=COMMAND_TIMEOUT_SECS
+            timeout=timeout
         )
         stdout = _clean_output(result.stdout)
         stderr = _clean_output(result.stderr)
@@ -377,7 +380,7 @@ def execute_local_command(command=None, **kwargs):
         output = _smart_truncate(output, TOOL_OUTPUT_MAX_CHARS)
         return output
     except subprocess.TimeoutExpired:
-        return f"Error: Command execution timeout ({COMMAND_TIMEOUT_SECS}s)"
+        return f"Error: Command execution timeout ({timeout}s)"
     except Exception as e:
         return f"Error: Command execution failed. Reason: {str(e)}"
 

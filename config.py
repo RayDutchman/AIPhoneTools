@@ -19,7 +19,8 @@ FILE_READ_MAX_BYTES     = 500 * 1024   # read_phone_file：单文件读取上限
 FILE_WRITE_MAX_BYTES    = 1 * 1024 * 1024  # write_phone_file：单次写入上限（字节）
 
 # ==== 命令执行 ====
-COMMAND_TIMEOUT_SECS    = 300   # execute_local_command：shell 命令超时（秒）
+COMMAND_TIMEOUT_SECS        = 300  # execute_local_command：shell 命令超时（秒）
+TERMUX_API_TIMEOUT_SECS     = 30   # termux-* 命令超时（秒），IPC 调用要么快速响应要么失败
 
 # ==== 工具调用轮次 ====
 MAX_TOOL_ROUNDS         = 50    # 最大工具调用轮数
