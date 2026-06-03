@@ -71,6 +71,7 @@ def _tts_worker():
             _tts_queue.task_done()
             continue
         if TTS_ENABLED and text.strip():
+            proc = None
             try:
                 proc = subprocess.Popen(
                     ["termux-tts-speak", "-r", str(TTS_RATE), text]
@@ -78,6 +79,15 @@ def _tts_worker():
                 with _tts_proc_lock:
                     _tts_current_proc = proc
                 proc.wait(timeout=TTS_SPEAK_TIMEOUT_SECS)
+            except subprocess.TimeoutExpired:
+                # 朗读超时：主动 kill，防止僵尸进程占用音频通道
+                log.warning(f"[TTS] speak timeout, killing process")
+                if proc:
+                    try:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
             except Exception as e:
                 log.warning(f"[TTS] speak error: {e}")
             finally:
@@ -95,6 +105,7 @@ def _tts_stop_current():
     if proc and proc.poll() is None:
         try:
             proc.kill()
+            proc.wait()  # 回收，防止僵尸进程继续占用音频通道
         except Exception:
             pass
     # Drain pending items
