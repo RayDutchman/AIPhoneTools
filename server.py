@@ -714,15 +714,11 @@ def call_llm_stream(messages, tools=None, model_id: str = None):
 
 # ==== 5. Tool Execution ====
 
-_TOOL_ROUND_TIMEOUT_SECS = 310  # 单轮并行工具整体超时（秒）
-                                # 比 COMMAND_TIMEOUT_SECS(300) 多 10s，让 subprocess 先超时，
-                                # ThreadPoolExecutor 只作最后兜底，防止真正卡死的进程
-
 def execute_all_tool_calls(tool_calls):
     """Execute all tool_calls in parallel and return a list of tool result messages.
     Results are returned in the same order as tool_calls.
-    Overall timeout: _TOOL_ROUND_TIMEOUT_SECS seconds — timed-out tools return an error
-    placeholder instead of blocking the whole round.
+    Each tool runs in its own thread; long-running tools (e.g. GPS, TTS) do not block others.
+    Individual tool timeout is handled inside execute_local_command (subprocess timeout=300s).
     """
     def _run_one(tool_call):
         func_info = tool_call.get("function", {})
@@ -778,32 +774,17 @@ def execute_all_tool_calls(tool_calls):
             executor.submit(_run_one, tc): i
             for i, tc in enumerate(tool_calls)
         }
-        try:
-            for future in as_completed(future_to_idx, timeout=_TOOL_ROUND_TIMEOUT_SECS):
-                idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    tc = tool_calls[idx]
-                    results[idx] = {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", "unknown"),
-                        "name": tc.get("function", {}).get("name", ""),
-                        "content": f"Error: tool execution failed: {str(e)}",
-                    }
-        except TimeoutError:
-            pass  # 整体超时，下面补齐未完成的工具
-        # 超时未完成的工具填充占位错误
-        for future, idx in future_to_idx.items():
-            if results[idx] is None:
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
                 tc = tool_calls[idx]
-                name = tc.get("function", {}).get("name", "")
-                log.warning(f"[TOOL] '{name}' timed out after {_TOOL_ROUND_TIMEOUT_SECS}s")
                 results[idx] = {
                     "role": "tool",
                     "tool_call_id": tc.get("id", "unknown"),
-                    "name": name,
-                    "content": f"Error: tool '{name}' timed out after {_TOOL_ROUND_TIMEOUT_SECS}s",
+                    "name": tc.get("function", {}).get("name", ""),
+                    "content": f"Error: tool execution failed: {str(e)}",
                 }
     return results
 
