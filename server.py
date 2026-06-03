@@ -116,15 +116,22 @@ def _tts_stop_current():
             break
 
 def _strip_markdown(text):
-    """Strip markdown formatting, leaving plain speakable text."""
-    # Remove code blocks (``` ... ```) - skip entirely
+    """Strip markdown formatting, leaving plain speakable text.
+    处理完整句子（由 _flush_sentences 保证），不处理 chunk 级别片段。
+    """
+    # Remove fenced code blocks (``` ... ```) - skip entirely
     text = re.sub(r"```[\s\S]*?```", "", text)
-    # Remove inline code backticks but keep the text
+    # Remove inline code, keep content
     text = re.sub(r"`([^`]*)`", r"\1", text)
     # Remove headings (#, ##, etc.)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    # Remove bold/italic (**text**, *text*, __text__, _text_)
-    text = re.sub(r"(\*{1,2}|_{1,2})(.+?)\1", r"\2", text, flags=re.DOTALL)
+    # Remove bold/italic: **text**, *text*, __text__, _text_（re.DOTALL 支持跨行）
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"\*(.+?)\*",     r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"__(.+?)__",     r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"_(.+?)_",       r"\1", text, flags=re.DOTALL)
+    # Remove strikethrough ~~text~~
+    text = re.sub(r"~~(.+?)~~",     r"\1", text, flags=re.DOTALL)
     # Remove links [text](url) -> text
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     # Remove images ![alt](url)
@@ -134,8 +141,9 @@ def _strip_markdown(text):
     # Remove bullet/numbered list markers
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
-    # 兜底：清除所有残留的 markdown 标记符（句子被分割后可能留下不成对的 * _ # ` ~）
-    text = re.sub(r"[*_`#~]+", "", text)
+    # 兜底：清除句子分割后残留的孤立标记符（如 ** _ ` ## 单独出现）
+    # 只删紧邻空白或位于字符串边界的标记符，避免误删正文中的合法字符
+    text = re.sub(r"(?<!\w)[*_`#~]+(?!\w)", "", text)
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
